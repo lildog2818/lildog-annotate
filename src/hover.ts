@@ -51,7 +51,6 @@ export function createHoverExtension(enabled: () => boolean) {
 				create: () => {
 					const dom = document.createElement("div");
 					dom.addClass("lildog-tooltip");
-					dom.createDiv({ cls: "lildog-tooltip-label", text: "批注" });
 					dom.createDiv({ cls: "lildog-tooltip-body", text: ann.body });
 					return { dom };
 				},

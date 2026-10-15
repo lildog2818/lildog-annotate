@@ -17,29 +17,49 @@
 
 /* --------------------------------------------------------------------------
    编辑器里的悬停预览
+   可见的框只有一层（CM6 的外层容器），整块统一圆角，不做「矩形里套一个圆角」。
+   内层只管文字排版，不画背景和边框。
    -------------------------------------------------------------------------- */
 .lildog-tooltip {
-	max-width: 380px;
-	padding: 8px 10px;
-	background: var(--background-secondary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
-	box-shadow: var(--shadow-s);
+	padding: 8px 11px;
+	color: var(--text-normal);
 	font-size: var(--font-ui-small);
-}
-
-.lildog-tooltip-label {
-	margin-bottom: 4px;
-	color: var(--text-accent);
-	font-size: var(--font-ui-smaller);
-	font-weight: 600;
+	line-height: 1.55;
 }
 
 .lildog-tooltip-body {
-	color: var(--text-normal);
 	white-space: pre-wrap;
 	word-break: break-word;
-	line-height: 1.5;
+}
+
+/* 底色带一点强调色，和灰底拉开距离，看得清 */
+.cm-tooltip:has(.lildog-tooltip) {
+	--lildog-tip-bg: color-mix(
+		in srgb,
+		var(--interactive-accent) 24%,
+		var(--background-primary)
+	);
+	--lildog-tip-border: color-mix(
+		in srgb,
+		var(--interactive-accent) 60%,
+		var(--background-modifier-border)
+	);
+	padding: 0;
+	background: var(--lildog-tip-bg);
+	border: 1px solid var(--lildog-tip-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-l);
+	overflow: hidden;
+}
+
+/* 兜底：有些主题的浮层不带 :has 支持时，内层自己画一个整圆角 */
+@supports not selector(:has(*)) {
+	.lildog-tooltip {
+		background: var(--background-primary);
+		border: 1px solid var(--background-modifier-border-hover);
+		border-radius: var(--radius-m);
+		box-shadow: var(--shadow-l);
+	}
 }
 
 /* --------------------------------------------------------------------------
