@@ -1,0 +1,171 @@
+/* ==========================================================================
+   Lildog Annotate
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   批注记号：带批注的文字加一条虚线下划线
+   -------------------------------------------------------------------------- */
+.cm-content .lildog-ann,
+.markdown-rendered mark.lildog-ann {
+	text-decoration: underline dotted var(--text-accent);
+	text-decoration-thickness: 1px;
+	text-underline-offset: 3px;
+	cursor: help;
+}
+
+/* --------------------------------------------------------------------------
+   编辑器里的悬停预览
+   -------------------------------------------------------------------------- */
+.lildog-tooltip {
+	max-width: 380px;
+	padding: 8px 10px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-small);
+}
+
+.lildog-tooltip-label {
+	margin-bottom: 4px;
+	color: var(--text-accent);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+}
+
+.lildog-tooltip-body {
+	color: var(--text-normal);
+	white-space: pre-wrap;
+	word-break: break-word;
+	line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+   选中文字后浮出的「批注」按钮
+   -------------------------------------------------------------------------- */
+.lildog-float-btn {
+	position: fixed;
+	z-index: var(--layer-popover, 30);
+	display: none;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-radius: var(--radius-s);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.6;
+	cursor: pointer;
+	user-select: none;
+}
+
+.lildog-float-btn:hover {
+	background: var(--interactive-accent-hover);
+}
+
+.lildog-float-icon {
+	display: flex;
+	align-items: center;
+}
+
+.lildog-float-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+/* --------------------------------------------------------------------------
+   段落批注的 callout
+   --callout-color 必须是 "r, g, b" 三元组，Obsidian 会自己套透明度
+   -------------------------------------------------------------------------- */
+.callout[data-callout="lildog"] {
+	--callout-color: 126, 122, 245;
+	--callout-icon: lucide-message-square-plus;
+}
+
+.callout[data-callout="lildog"] .callout-title {
+	font-weight: 600;
+}
+
+.callout[data-callout="lildog"] .callout-content p {
+	margin-block-start: 0.4em;
+	margin-block-end: 0.4em;
+}
+
+/* --------------------------------------------------------------------------
+   批注输入框
+   -------------------------------------------------------------------------- */
+.lildog-modal .lildog-modal-quote {
+	margin-bottom: 12px;
+	padding: 8px 10px;
+	background: var(--background-secondary);
+	border-left: 3px solid var(--text-accent);
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	line-height: 1.5;
+	word-break: break-word;
+}
+
+.lildog-modal .lildog-modal-field {
+	display: block;
+}
+
+.lildog-modal .lildog-modal-field .setting-item-info {
+	margin-bottom: 6px;
+}
+
+.lildog-modal .lildog-modal-field .setting-item-control {
+	width: 100%;
+}
+
+.lildog-modal textarea.lildog-textarea {
+	width: 100%;
+	min-height: 96px;
+	resize: vertical;
+	font-family: var(--font-text);
+}
+
+.lildog-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   设置页
+   -------------------------------------------------------------------------- */
+.lildog-settings-info {
+	margin-top: 24px;
+	padding: 12px 14px;
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.lildog-settings-info h4 {
+	margin: 0 0 6px;
+	color: var(--text-normal);
+}
+
+.lildog-settings-info h4:not(:first-child) {
+	margin-top: 14px;
+}
+
+.lildog-settings-info p {
+	margin: 6px 0;
+	line-height: 1.6;
+}
+
+.lildog-settings-pre {
+	margin: 6px 0;
+	padding: 8px 10px;
+	background: var(--background-primary);
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	font-size: var(--font-smaller);
+	white-space: pre-wrap;
+	word-break: break-all;
+}
