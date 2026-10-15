@@ -7,8 +7,11 @@ node_modules/
 
 # test scratch
 test/.tmp/
+test/.shots/
+test/vault/DSH/
+test/vault/.trash/
 
-# obsidian
+# obsidian（测试库的 .obsidian 由 test/sync.mjs 生成，不入库）
 data.json
 .obsidian/
 

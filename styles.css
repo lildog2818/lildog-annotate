@@ -1,64 +1,143 @@
 /* ==========================================================================
    Lildog Annotate
+   颜色和字号都走 CSS 变量，由插件设置写进 body.style：
+     --lildog-annotate-fg     被批注文字的颜色
+     --lildog-annotate-bg     被批注文字的底色
+     --lildog-annotate-line   被批注文字的下划线颜色
+     --lildog-card-font-size  悬停浮窗的字号
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   批注记号：带批注的文字加一条虚线下划线
+   批注记号：底色 + 同色下划线 + 另一种文字颜色
+   只靠一层淡淡的灰底会和正文糊在一起，所以再加一条下划线提高辨识度。
    -------------------------------------------------------------------------- */
-/* 批注记号：只要一层高亮底色，干净；想换颜色改这个变量即可 */
 .cm-content .lildog-ann,
-.markdown-rendered mark.lildog-ann,
 .markdown-rendered .lildog-ann {
-	background: var(--lildog-annotate-bg, rgba(126, 122, 245, 0.2));
-	border-radius: var(--radius-s);
+	background: var(--lildog-annotate-bg, rgba(126, 122, 245, 0.32)) !important;
+	color: var(--lildog-annotate-fg, #d9822b) !important;
+	box-shadow: inset 0 -2px 0 var(--lildog-annotate-line, rgba(126, 122, 245, 0.77));
+	border-radius: 3px;
 	cursor: help;
 	text-decoration: none;
 }
 
-/* --------------------------------------------------------------------------
-   编辑器里的悬停预览
-   可见的框只有一层（CM6 的外层容器），整块统一圆角，不做「矩形里套一个圆角」。
-   内层只管文字排版，不画背景和边框。
-   -------------------------------------------------------------------------- */
-.lildog-tooltip {
-	padding: 8px 11px;
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-	line-height: 1.55;
+/* 高亮里嵌着行内代码、链接时，里面的子元素也要跟着变色，
+   否则会出现「一半橙一半灰」的割裂感 */
+.cm-content .lildog-ann *,
+.markdown-rendered .lildog-ann * {
+	color: inherit !important;
 }
 
-.lildog-tooltip-body {
-	white-space: pre-wrap;
+/* --------------------------------------------------------------------------
+   悬停浮窗：看内容 + 直接改批注
+   -------------------------------------------------------------------------- */
+.lildog-card {
+	position: fixed;
+	z-index: var(--layer-popover, 30);
+	display: none;
+	min-width: 220px;
+	max-width: 380px;
+	padding: 10px 12px;
+	background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-primary));
+	border: 1px solid var(--background-modifier-border-focus, var(--background-modifier-border));
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-l);
+	color: var(--text-normal);
+	font-size: var(--lildog-card-font-size, 14px);
+	line-height: 1.6;
+	cursor: default;
+}
+
+.lildog-card-quote {
+	margin-bottom: 6px;
+	padding-bottom: 6px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: 0.92em;
 	word-break: break-word;
 }
 
-/* 底色带一点强调色，和灰底拉开距离，看得清 */
-.cm-tooltip:has(.lildog-tooltip) {
-	--lildog-tip-bg: color-mix(
-		in srgb,
-		var(--interactive-accent) 24%,
-		var(--background-primary)
-	);
-	--lildog-tip-border: color-mix(
-		in srgb,
-		var(--interactive-accent) 60%,
-		var(--background-modifier-border)
-	);
-	padding: 0;
-	background: var(--lildog-tip-bg);
-	border: 1px solid var(--lildog-tip-border);
-	border-radius: var(--radius-m);
-	box-shadow: var(--shadow-l);
-	overflow: hidden;
+.lildog-card-quote:empty {
+	display: none;
 }
 
-/* 兜底：有些主题的浮层不带 :has 支持时，内层自己画一个整圆角 */
-@supports not selector(:has(*)) {
-	.lildog-tooltip {
+.lildog-card-body {
+	white-space: pre-wrap;
+	word-break: break-word;
+	cursor: text;
+}
+
+.lildog-card-body:hover {
+	color: var(--text-accent);
+}
+
+.lildog-card-edit {
+	display: none;
+}
+
+.lildog-card textarea.lildog-card-textarea {
+	width: 100%;
+	min-height: calc(var(--lildog-card-font-size, 14px) * 4.5);
+	font-family: var(--font-text);
+	font-size: inherit;
+	line-height: 1.6;
+	resize: vertical;
+}
+
+.lildog-card textarea.lildog-card-textarea-error {
+	border-color: var(--text-error);
+}
+
+.lildog-card-hint {
+	margin-top: 4px;
+	color: var(--text-faint);
+	font-size: 0.85em;
+}
+
+.lildog-card-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.lildog-card-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 4px;
+}
+
+.lildog-card-btn {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 6px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: 0.92em;
+	cursor: pointer;
+}
+
+.lildog-card-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.lildog-card-btn-icon {
+	display: flex;
+	align-items: center;
+}
+
+.lildog-card-btn-icon svg {
+	width: 0.95em;
+	height: 0.95em;
+}
+
+/* 主题不支持 color-mix 时退回普通背景 */
+@supports not (background: color-mix(in srgb, red 10%, blue)) {
+	.lildog-card {
 		background: var(--background-primary);
-		border: 1px solid var(--background-modifier-border-hover);
-		border-radius: var(--radius-m);
-		box-shadow: var(--shadow-l);
 	}
 }
 
@@ -115,7 +194,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   批注输入框
+   批注输入框（弹窗）
    -------------------------------------------------------------------------- */
 .lildog-modal .lildog-modal-quote {
 	margin-bottom: 12px;

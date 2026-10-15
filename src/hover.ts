@@ -1,8 +1,7 @@
-import { MarkdownPostProcessorContext, Notice, setTooltip, TFile } from "obsidian";
+import { MarkdownPostProcessorContext, Notice, TFile } from "obsidian";
 import type { App } from "obsidian";
-import { EditorView, hoverTooltip } from "@codemirror/view";
-import { findInlineAnnotations, normalizeForCompare, stripInlineMarkdown } from "./format";
-import type { InlineAnnotation } from "./format";
+import { EditorView } from "@codemirror/view";
+import { findInlineAnnotations, lineOffsets, MARKER, normalizeForCompare, stripInlineMarkdown } from "./format";
 import { buildEditorDecorations } from "./decorations";
 import { diag } from "./diagnostics";
 
@@ -33,41 +32,14 @@ export function createEditorDecorations() {
 }
 
 /**
- * 编辑器（实时预览 / 源码模式）里悬停显示批注内容。
- * 编辑器里能直接读到源码，所以这里的位置判断是精确的。
- */
-export function createHoverExtension(enabled: () => boolean) {
-	return hoverTooltip(
-		(view, pos) => {
-			if (!enabled()) return null;
-			const ann = findInlineAnnotations(view.state.doc.toString()).find(
-				(item) => pos >= item.from && pos <= item.to,
-			);
-			if (!ann || !ann.body.trim()) return null;
-			return {
-				pos: ann.from,
-				end: ann.to,
-				above: true,
-				create: () => {
-					const dom = document.createElement("div");
-					dom.addClass("lildog-tooltip");
-					dom.createDiv({ cls: "lildog-tooltip-body", text: ann.body });
-					return { dom };
-				},
-			};
-		},
-		{ hoverTime: 150 },
-	);
-}
-
-/**
  * 阅读视图：批注标记在渲染时就被丢掉了，所以要从源码里把批注取出来，
  * 再在渲染结果里找到对应的文字。
  *
  * 两步走：
  *   1. 优先找 Obsidian 自己渲染出来的 <mark>（旧格式 ==高亮== 的产物）；
- *   2. 找不到就自己把那段文字包进 <mark>。这样即使没有现成高亮，批注也照样
- *      有虚线和悬停内容。
+ *   2. 找不到就自己把那段文字包进 <mark>。
+ * 无论走哪条路，都把批注在源码里的绝对偏移记在 dataset 上 —— 悬停浮窗
+ * 要拿它把改动写回文件（阅读视图里拿不到编辑器选区）。
  */
 export async function decorateReadingView(
 	el: HTMLElement,
@@ -76,46 +48,50 @@ export async function decorateReadingView(
 ): Promise<void> {
 	diag.postProcessorRuns++;
 
-	const annotations = await collectAnnotations(el, ctx, app);
+	const info = ctx.getSectionInfo ? ctx.getSectionInfo(el) : null;
+	if (!info) diag.sectionInfoMissing++;
+	// 后处理器每一段都会跑：这一段源码里没有批注就直接撤，省掉一次文件读
+	if (info && typeof info.text === "string" && !info.text.includes(MARKER)) return;
+
+	const file = app.vault.getAbstractFileByPath(ctx.sourcePath);
+	if (!(file instanceof TFile)) return;
+	diag.fallbackReads++;
+	const doc = await app.vault.cachedRead(file);
+	const annotations = findInlineAnnotations(doc);
 	if (!annotations.length) return;
+
+	const section = info ? sectionRange(doc, info.lineStart, info.lineEnd) : null;
+	const mine = section
+		? annotations.filter((ann) => ann.from >= section.from && ann.from < section.to)
+		: annotations;
+	if (!mine.length) return;
 
 	const marks = Array.from(el.querySelectorAll("mark")) as HTMLElement[];
 	diag.marksFound += marks.length;
 
 	const used = new Set<Element>();
-	for (const ann of annotations) {
+	for (const ann of mine) {
 		const target =
 			findMatchingMark(marks, used, ann.text) ?? wrapTextNode(el, ann.text);
 		if (!target) continue;
 		used.add(target);
 		diag.annotationsMatched++;
 		target.addClass("lildog-ann");
-		if (ann.body.trim()) {
-			setTooltip(target, ann.body, { placement: "top" });
-		}
+		target.dataset.lildogFrom = String(ann.from);
+		target.dataset.lildogTo = String(ann.to);
 	}
 }
 
-async function collectAnnotations(
-	el: HTMLElement,
-	ctx: MarkdownPostProcessorContext,
-	app: App,
-): Promise<InlineAnnotation[]> {
-	const info = ctx.getSectionInfo ? ctx.getSectionInfo(el) : null;
-	if (info && typeof info.text === "string") {
-		const found = findInlineAnnotations(info.text);
-		if (found.length) return found;
-	} else {
-		diag.sectionInfoMissing++;
-	}
-
-	// 兜底：整篇读一遍，按文字内容配对
-	const file = app.vault.getAbstractFileByPath(ctx.sourcePath);
-	if (file instanceof TFile) {
-		diag.fallbackReads++;
-		return findInlineAnnotations(await app.vault.cachedRead(file));
-	}
-	return [];
+/** 某个段落（行号范围）在源码里的字符范围 */
+function sectionRange(
+	doc: string,
+	lineStart: number,
+	lineEnd: number,
+): { from: number; to: number } {
+	const offsets = lineOffsets(doc);
+	const from = offsets[lineStart] ?? 0;
+	const to = offsets[lineEnd + 1] ?? doc.length;
+	return { from, to: Math.max(from, to) };
 }
 
 /** 按文字内容找 Obsidian 渲染出来的高亮，比对时剥掉行内语法 */

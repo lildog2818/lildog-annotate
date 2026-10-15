@@ -22,6 +22,12 @@ export interface DiagnosticCounters {
 	annotationsMatched: number;
 	/** 走整篇兜底读取的次数 */
 	fallbackReads: number;
+	/** 悬停浮窗弹出来的次数 */
+	hoverShows: number;
+	/** 在悬停浮窗里改完批注的次数 */
+	hoverEdits: number;
+	/** 最近一次悬停浮窗的目标（弹不出来时看这里） */
+	lastHover: string;
 	/** 最近一次「选中文字」探测：浮动按钮为什么出现/没出现 */
 	lastSelection: string;
 }
@@ -35,6 +41,9 @@ export const diag: DiagnosticCounters = {
 	marksFound: 0,
 	annotationsMatched: 0,
 	fallbackReads: 0,
+	hoverShows: 0,
+	hoverEdits: 0,
+	lastHover: "（还没有悬停过批注）",
 	lastSelection: "（还没有在编辑器里选过文字）",
 };
 
@@ -47,5 +56,8 @@ export function resetDiagnostics(): void {
 	diag.marksFound = 0;
 	diag.annotationsMatched = 0;
 	diag.fallbackReads = 0;
+	diag.hoverShows = 0;
+	diag.hoverEdits = 0;
+	diag.lastHover = "（还没有悬停过批注）";
 	diag.lastSelection = "（还没有在编辑器里选过文字）";
 }

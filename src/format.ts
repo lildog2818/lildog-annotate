@@ -265,31 +265,44 @@ export function lineOffsets(doc: string): number[] {
 /**
  * 在源码里定位一段文字。阅读视图和编辑器里的表格（块级 widget）拿不到
  * 编辑器选区，只能靠 DOM 里的文字反查源码，这里就是干这个的。
+ *
+ * preferOffset 是「用户大概选在这里」的源码偏移：同一段文字出现多次时，
+ * 取离它最近的那一处 —— 在哪选的就在哪批注，而不是一律用第一处。
  */
 export function locateText(
 	doc: string,
 	text: string,
 	startOffset = 0,
 	endOffset = doc.length,
+	preferOffset?: number,
 ): TextLocation | null {
 	const needle = text.trim();
 	if (!needle) return null;
 	const from = Math.max(0, Math.min(startOffset, doc.length));
 	const to = Math.max(from, Math.min(endOffset, doc.length));
 	const haystack = doc.slice(from, to);
-	const index = haystack.indexOf(needle);
-	if (index === -1) return null;
+	const first = haystack.indexOf(needle);
+	if (first === -1) return null;
 
-	let matches = 0;
-	let scan: number = index;
+	const offsets: number[] = [];
+	let scan: number = first;
 	while (scan !== -1) {
-		matches++;
+		offsets.push(scan);
 		scan = haystack.indexOf(needle, scan + 1);
 	}
+
+	let index = first;
+	if (typeof preferOffset === "number" && Number.isFinite(preferOffset) && offsets.length > 1) {
+		const want = preferOffset - from;
+		index = offsets.reduce((best, candidate) =>
+			Math.abs(candidate - want) < Math.abs(best - want) ? candidate : best,
+		);
+	}
+
 	return {
 		fromOffset: from + index,
 		toOffset: from + index + needle.length,
-		matches,
+		matches: offsets.length,
 	};
 }
 

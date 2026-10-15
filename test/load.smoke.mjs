@@ -34,6 +34,12 @@ const editorExtensions = [];
 const postProcessors = [];
 const settingTabs = [];
 const notices = [];
+/** applyAppearance() 写进 body 的 CSS 变量，用来确认外观设置真的落地了 */
+const styleVars = new Map();
+const bodyStyle = {
+	setProperty: (name, value) => styleVars.set(name, String(value)),
+	removeProperty: (name) => styleVars.delete(name),
+};
 
 class PluginStub {
 	constructor(app, manifest) {
@@ -126,7 +132,7 @@ globalThis.document = {
 	removeEventListener() {},
 	createElement: () => ({}),
 	querySelectorAll: () => [],
-	body: { createDiv: () => ({}), createEl: () => ({}) },
+	body: { createDiv: () => ({}), createEl: () => ({}), style: bodyStyle },
 };
 globalThis.window = {
 	addEventListener() {},
@@ -220,7 +226,7 @@ check(
 	"每条命令都有中文名",
 	commands.every((c) => typeof c.name === "string" && c.name.length > 0),
 );
-check("注册了编辑器扩展（下划线 / 图标 / 悬停）", editorExtensions.length === 1);
+check("注册了编辑器扩展（装饰 / 隐藏标记）", editorExtensions.length === 1);
 check("注册了阅读视图后处理器", postProcessors.length === 1);
 check("注册了设置页", settingTabs.length === 1);
 check(
@@ -230,6 +236,29 @@ check(
 		plugin.settings.showFloatingButton === true &&
 		plugin.settings.hoverPreview === true,
 );
+check(
+	"默认外观：批注文字另配色 / 底色带透明度的紫 / 浮窗字号 14px",
+	styleVars.get("--lildog-annotate-fg") === "#d9822b" &&
+		styleVars.get("--lildog-annotate-bg") === "rgba(126, 122, 245, 0.32)" &&
+		styleVars.get("--lildog-card-font-size") === "14px",
+);
+check(
+	"外观变量写在 body 上（主题里能继承到）",
+	styleVars.has("--lildog-annotate-line"),
+);
+{
+	// 手改 data.json 里的非法值不该把插件带崩
+	plugin.settings.annotatedTextColor = "不是颜色";
+	plugin.settings.cardFontSize = 999;
+	plugin.settings.highlightOpacity = -1;
+	await plugin.loadSettings();
+	check(
+		"设置读回来会被收口（非法颜色/越界数字都拉回默认）",
+		plugin.settings.annotatedTextColor === "#d9822b" &&
+			plugin.settings.cardFontSize === 14 &&
+			plugin.settings.highlightOpacity === 0.32,
+	);
+}
 
 // 真跑一次自检命令，确认报告能生成（界面里的诊断通道不能是坏的）
 const selfCheck = commands.find((c) => c.id === "run-self-check");
@@ -249,6 +278,9 @@ check(
 	report.includes(".lildog-ann（批注高亮）元素"),
 );
 check("报告记录了最近一次选中探测", report.includes("最近一次选中文字探测"));
+check("报告记录了悬停浮窗的统计", report.includes("悬停浮窗：弹出"));
+check("报告记录了最近一次悬停", report.includes("最近一次悬停"));
+check("报告记录了外观设置", report.includes("外观：批注文字"));
 check("报告记录了插件版本", report.includes("插件版本："));
 check("报告会提示 getSectionInfo 状态", report.includes("getSectionInfo"));
 check("报告带构建指纹", report.includes("加载的构建："));

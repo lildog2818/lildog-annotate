@@ -44,7 +44,14 @@ function describeNodes(el: Element | null): string {
 export async function writeSelfCheckReport(
 	app: App,
 	pluginVersion: string,
+	appearance: {
+		annotatedTextColor: string;
+		highlightColor: string;
+		highlightOpacity: number;
+		cardFontSize: number;
+	},
 ): Promise<string> {
+	const settings = appearance;
 	const lines: string[] = [];
 
 	lines.push("# Lildog Annotate 自检报告");
@@ -64,7 +71,14 @@ export async function writeSelfCheckReport(
 	lines.push(
 		`- 整个界面里 .lildog-ann（批注高亮）元素：${document.querySelectorAll(".lildog-ann").length} 个`,
 	);
+	lines.push(
+		`- 悬停浮窗：弹出 ${diag.hoverShows} 次 / 在浮窗里改完 ${diag.hoverEdits} 次`,
+	);
+	lines.push(`- 最近一次悬停：${diag.lastHover}`);
 	lines.push(`- 最近一次选中文字探测：${diag.lastSelection}`);
+	lines.push(
+		`- 外观：批注文字 ${settings.annotatedTextColor} / 底色 ${settings.highlightColor} ${Math.round(settings.highlightOpacity * 100)}% / 浮窗字号 ${settings.cardFontSize}px`,
+	);
 	lines.push("");
 	lines.push("## 逐窗格探针");
 

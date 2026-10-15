@@ -1,5 +1,7 @@
 import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
 import type { EditorPosition } from "obsidian";
+import { EditorView } from "@codemirror/view";
+import { hexToRgba } from "./colors";
 import {
 	blockInsertLine,
 	canUseInline,
@@ -19,13 +21,11 @@ import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
-import {
-	createEditorDecorations,
-	createHoverExtension,
-	decorateReadingView,
-} from "./hover";
+import { createEditorDecorations, decorateReadingView } from "./hover";
+import { HoverCard } from "./hovercard";
+import type { HoverTarget } from "./hovercard";
 import { writeSelfCheckReport } from "./selfcheck";
-import { DEFAULT_SETTINGS, LildogSettingTab } from "./settings";
+import { DEFAULT_SETTINGS, LildogSettingTab, sanitizeSettings } from "./settings";
 import type { AnnotationMode, LildogSettings } from "./settings";
 
 /** 光标位置处找到的一条批注 */
@@ -62,29 +62,47 @@ function describeTarget(target: HTMLElement | null): string {
 	return `${target.tagName.toLowerCase()}${cls}`;
 }
 
+/**
+ * 选区在 DOM 里的起点，占整段文字的百分比。
+ *
+ * 同一段文字在笔记里出现多次时，光靠文字内容分不出是哪一处（这正是以前
+ * 「批注会加在第一处」的原因）。这里量一个相对位置，让源码里的查找就近命中。
+ */
+function domRatio(el: HTMLElement, range: Range): number {
+	const total = (el.textContent ?? "").length;
+	if (total <= 0) return 0;
+	try {
+		const before = document.createRange();
+		before.setStart(el, 0);
+		before.setEnd(range.startContainer, range.startOffset);
+		const index = before.toString().length;
+		return Math.min(1, Math.max(0, index / total));
+	} catch {
+		return 0;
+	}
+}
+
 export default class LildogAnnotatePlugin extends Plugin {
 	settings: LildogSettings = { ...DEFAULT_SETTINGS };
 	private floating: FloatingAnnotateButton | null = null;
+	private hoverCard: HoverCard | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.addSettingTab(new LildogSettingTab(this.app, this));
+		this.applyAppearance();
 
-		// 批注记号 + 悬停预览（编辑器）
-		this.registerEditorExtension([
-			createEditorDecorations(),
-			createHoverExtension(() => this.settings.hoverPreview),
-		]);
-		// 阅读视图：给每个段落打上行号范围（阅读视图里按文字反查源码要用），并挂悬停预览
+		// 批注记号（编辑器）：标记藏起来 + 被批注的文字上色
+		this.registerEditorExtension([createEditorDecorations()]);
+		// 阅读视图：给每个段落打上行号范围（阅读视图里按文字反查源码要用），
+		// 并把批注对应的文字找出来上色、记下源码偏移
 		this.registerMarkdownPostProcessor(async (el, ctx) => {
 			const info = ctx.getSectionInfo ? ctx.getSectionInfo(el) : null;
 			if (info) {
 				el.dataset.lildogStart = String(info.lineStart);
 				el.dataset.lildogEnd = String(info.lineEnd);
 			}
-			if (this.settings.hoverPreview) {
-				await decorateReadingView(el, ctx, this.app);
-			}
+			await decorateReadingView(el, ctx, this.app);
 		});
 
 		this.addCommand({
@@ -120,6 +138,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 				const path = await writeSelfCheckReport(
 					this.app,
 					this.manifest.version,
+					this.settings,
 				);
 				new Notice(`自检报告已写入：${path}\n构建：${BUILD_ID}`);
 			},
@@ -153,18 +172,209 @@ export default class LildogAnnotatePlugin extends Plugin {
 			}),
 		);
 
+		// 悬停浮窗：内容直接可改，回车即收
+		this.hoverCard = new HoverCard({
+			fontSize: () => this.settings.cardFontSize,
+			onSave: (target, body) => this.saveFromCard(target, body),
+		});
+		this.register(() => this.hoverCard?.destroy());
+
 		// 选中文字后的浮动按钮
 		this.floating = new FloatingAnnotateButton((snapshot) =>
 			this.annotateSnapshot(snapshot),
 		);
 		this.register(() => this.floating?.destroy());
 		this.registerDomEvent(document, "mouseup", (evt) => this.handleMouseUp(evt));
+		this.registerDomEvent(document, "mouseover", (evt) => this.handleHoverStart(evt), true);
+		this.registerDomEvent(document, "mouseout", (evt) => this.handleHoverEnd(evt), true);
+		this.registerDomEvent(
+			document,
+			"keydown",
+			(evt) => {
+				// 回车 / Esc 之后浮窗立刻收起来，不用再去点别的地方
+				if (evt.key !== "Enter" && evt.key !== "Escape") return;
+				if (this.hoverCard?.contains(evt.target as Node)) return;
+				this.hoverCard?.hide();
+			},
+			true,
+		);
 		this.registerDomEvent(document, "mousedown", (evt) => {
 			if (!this.floating?.contains(evt.target)) this.floating?.hide();
+			if (!this.hoverCard?.contains(evt.target as Node)) this.hoverCard?.hide();
 		});
-		this.registerDomEvent(window, "scroll", () => this.floating?.hide(), {
-			capture: true,
+		this.registerDomEvent(
+			window,
+			"scroll",
+			() => {
+				this.floating?.hide();
+				this.hoverCard?.hide();
+			},
+			{ capture: true },
+		);
+		// 正文一变（打字、撤销、别的插件改动），浮窗里的偏移就失效了，直接收起
+		this.registerEvent(
+			this.app.workspace.on("editor-change", () => this.hoverCard?.hide()),
+		);
+	}
+
+	onunload(): void {
+		this.clearAppearance();
+	}
+
+	// ---------------------------------------------------------------- 外观
+
+	/** 把设置里的颜色 / 字号写进 CSS 变量：样式表只管用变量，不再有硬编码颜色 */
+	applyAppearance(): void {
+		const style = document.body.style;
+		const { annotatedTextColor, highlightColor, highlightOpacity } = this.settings;
+		style.setProperty("--lildog-annotate-fg", annotatedTextColor);
+		style.setProperty(
+			"--lildog-annotate-bg",
+			hexToRgba(highlightColor, highlightOpacity),
+		);
+		style.setProperty(
+			"--lildog-annotate-line",
+			hexToRgba(highlightColor, Math.min(1, highlightOpacity + 0.45)),
+		);
+		style.setProperty("--lildog-card-font-size", `${this.settings.cardFontSize}px`);
+		this.hoverCard?.refreshStyle();
+	}
+
+	private clearAppearance(): void {
+		const style = document.body.style;
+		for (const name of [
+			"--lildog-annotate-fg",
+			"--lildog-annotate-bg",
+			"--lildog-annotate-line",
+			"--lildog-card-font-size",
+		]) {
+			style.removeProperty(name);
+		}
+	}
+
+	/** 设置页改了东西后让它立刻生效（也顺手把浮窗收掉，免得看到旧样式） */
+	hideHoverCard(): void {
+		this.hoverCard?.hide();
+	}
+
+	// ---------------------------------------------------------------- 悬停浮窗
+
+	private handleHoverStart(evt: MouseEvent): void {
+		const card = this.hoverCard;
+		if (!card) return;
+		const node = evt.target;
+		if (!(node instanceof Element)) return;
+		if (card.contains(node)) {
+			card.cancelHide();
+			return;
+		}
+		if (!this.settings.hoverPreview) return;
+
+		const el = node.closest(".lildog-ann") as HTMLElement | null;
+		if (!el) return;
+
+		const target = this.resolveHoverTarget(el);
+		if (!target) {
+			diag.lastHover = `悬停到 .lildog-ann 但没在源码里认出批注（${el.tagName.toLowerCase()}）`;
+			return;
+		}
+		diag.hoverShows++;
+		diag.lastHover = `${target.view.getMode() === "preview" ? "阅读视图" : "编辑器"} · 原文「${target.text.slice(0, 20)}」 · 批注「${target.body.slice(0, 20)}」`;
+		card.show(target, el.getBoundingClientRect());
+	}
+
+	private handleHoverEnd(evt: MouseEvent): void {
+		const node = evt.target;
+		if (!(node instanceof Element)) return;
+		const el = node.closest(".lildog-ann");
+		if (!el) return;
+		const to = evt.relatedTarget as Node | null;
+		if (to && (el.contains(to) || this.hoverCard?.contains(to))) return;
+		this.hoverCard?.scheduleHide();
+	}
+
+	/**
+	 * 从悬停到的高亮元素倒推出是哪一条批注。
+	 *
+	 * 编辑器里能通过 CodeMirror 把 DOM 位置换算成文档偏移，精确；
+	 * 阅读视图里没有这个通道，就用装饰时记在 dataset 上的源码偏移。
+	 */
+	private resolveHoverTarget(el: HTMLElement): HoverTarget | null {
+		const cmEl = el.closest(".cm-editor") as HTMLElement | null;
+		if (cmEl) {
+			const cmView = EditorView.findFromDOM(cmEl);
+			const view = this.markdownViewFor(el);
+			if (!cmView || !view) return null;
+			const doc = cmView.state.doc.toString();
+			const annotations = findInlineAnnotations(doc);
+			let pos: number | null = null;
+			try {
+				pos = cmView.posAtDOM(el);
+			} catch {
+				pos = null;
+			}
+			let ann =
+				pos === null
+					? undefined
+					: annotations.find((item) => pos! >= item.from && pos! <= item.to);
+			if (!ann) {
+				// 块级 widget（表格等）换算不出偏移时，退回按文字配对
+				const text = (el.textContent ?? "").trim();
+				ann = annotations.find((item) => item.text.trim() === text);
+			}
+			if (!ann) return null;
+			return { view, from: ann.from, to: ann.to, text: ann.text, body: ann.body };
+		}
+
+		const from = Number(el.dataset.lildogFrom);
+		const to = Number(el.dataset.lildogTo);
+		const view = this.markdownViewFor(el);
+		if (!view || !Number.isFinite(from) || !Number.isFinite(to)) return null;
+		const annotations = findInlineAnnotations(view.editor.getValue());
+		const ann =
+			annotations.find((item) => item.from === from && item.to === to) ??
+			annotations.find((item) => from >= item.from && from < item.to);
+		if (!ann) return null;
+		return { view, from: ann.from, to: ann.to, text: ann.text, body: ann.body };
+	}
+
+	/** 浮窗里点了保存：把新的批注内容写回笔记 */
+	private saveFromCard(target: HoverTarget, body: string): void {
+		const editor = target.view.editor;
+		const doc = editor.getValue();
+		const ann = findInlineAnnotations(doc).find(
+			(item) => item.from === target.from && item.to === target.to,
+		);
+		if (!ann) {
+			new Notice("这条批注已经变化，请重新悬停后再改");
+			return;
+		}
+		const replacement = serializeInline(ann.text, body);
+		editor.replaceRange(
+			replacement,
+			editor.offsetToPos(ann.from),
+			editor.offsetToPos(ann.to),
+		);
+		// 光标落在整条批注之后：标记立刻收起，不用再点别处
+		editor.setCursor(editor.offsetToPos(ann.from + replacement.length));
+		this.persist(editor, {
+			text: ann.text,
+			fromOffset: ann.from,
+			toOffset: ann.to,
+			view: target.view,
 		});
+		diag.hoverEdits++;
+	}
+
+	/** 高亮元素属于哪个 Markdown 窗格（编辑器可能被拖到别的叶子里） */
+	private markdownViewFor(el: Element): MarkdownView | null {
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const view = leaf.view;
+			if (view instanceof MarkdownView && view.containerEl.contains(el)) {
+				return view;
+			}
+		}
+		return this.app.workspace.getActiveViewOfType(MarkdownView);
 	}
 
 	// ---------------------------------------------------------------- 入口
@@ -195,6 +405,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 			return;
 		}
 		this.floating?.hide();
+		this.hoverCard?.hide();
 		this.openComposer(editor, {
 			text,
 			fromOffset: editor.posToOffset(editor.getCursor("from")),
@@ -208,7 +419,8 @@ export default class LildogAnnotatePlugin extends Plugin {
 	 *
 	 * 编辑器里的普通选区位置精确，直接用；阅读视图、以及编辑器里被渲染成
 	 * 块级 widget 的表格等位置，编辑器选区拿不到，就退回「用 DOM 里的文字
-	 * 反查源码」，并用段落行号范围缩小查找范围。
+	 * 反查源码」，并按选区在段落里的相对位置就近命中 —— 同一段文字重复出现
+	 * 时，批注加在**你选的那一处**，而不是第一处。
 	 */
 	private handleMouseUp(evt: MouseEvent): void {
 		if (!this.settings.showFloatingButton) {
@@ -253,7 +465,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 			action = "浮出按钮（编辑器选区）";
 		} else {
 			const doc = editor.getValue();
-			const located = this.locateInSection(doc, domText, anchor);
+			const located = this.locateInSection(doc, domText, anchor, range);
 			if (!located) {
 				action = "没能在源码里定位到选中的文字";
 			} else {
@@ -263,16 +475,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 					fromOffset: located.fromOffset,
 					toOffset: located.toOffset,
 				};
-				action =
-					located.matches > 1
-						? `浮出按钮（按文字反查，命中 ${located.matches} 处，用第一处）`
-						: "浮出按钮（按文字反查）";
-				if (located.matches > 1) {
-					new Notice(
-						`这段文字在笔记里出现 ${located.matches} 次，批注会加在第一处`,
-						4000,
-					);
-				}
+				action = `浮出按钮（按文字反查，${located.matches} 处相同，取选区所在那一处）`;
 			}
 		}
 
@@ -285,15 +488,19 @@ export default class LildogAnnotatePlugin extends Plugin {
 		this.floating?.show(snapshot, rect);
 	}
 
-	/** 在选区所属段落（阅读视图里打了行号）的源码范围内找这段文字 */
+	/**
+	 * 在选区所属段落（阅读视图里打了行号）的源码范围内找这段文字。
+	 * 找不到再退回全文，并且都带上「选区在 DOM 里的相对位置」作为就近依据。
+	 */
 	private locateInSection(
 		doc: string,
 		text: string,
 		anchor: Element | null,
+		range: Range | null,
 	): TextLocation | null {
-		const sectionEl = anchor?.closest(
-			"[data-lildog-start]",
-		) as HTMLElement | null;
+		const sectionEl = anchor?.closest("[data-lildog-start]") as HTMLElement | null;
+		const ratio = sectionEl && range ? domRatio(sectionEl, range) : 0;
+
 		if (sectionEl) {
 			const startLine = Number(sectionEl.dataset.lildogStart);
 			const endLine = Number(sectionEl.dataset.lildogEnd);
@@ -301,11 +508,12 @@ export default class LildogAnnotatePlugin extends Plugin {
 				const offsets = lineOffsets(doc);
 				const start = offsets[startLine] ?? 0;
 				const end = offsets[endLine + 1] ?? doc.length;
-				const hit = locateText(doc, text, start, end);
+				const prefer = start + ratio * Math.max(0, end - start);
+				const hit = locateText(doc, text, start, end, prefer);
 				if (hit) return hit;
 			}
 		}
-		return locateText(doc, text);
+		return locateText(doc, text, 0, doc.length, ratio * doc.length);
 	}
 
 	// ---------------------------------------------------------------- 写入
@@ -341,6 +549,8 @@ export default class LildogAnnotatePlugin extends Plugin {
 			return;
 		}
 
+		this.hoverCard?.hide();
+
 		if (mode === "inline") {
 			if (doc.slice(range.fromOffset, range.toOffset) !== range.text) {
 				new Notice("原文已经变化，批注没有写入，请重新选中");
@@ -352,11 +562,14 @@ export default class LildogAnnotatePlugin extends Plugin {
 				range.fromOffset,
 				range.toOffset,
 			);
+			const replacement = serializeInline(doc.slice(range.fromOffset, toOffset), body);
 			editor.replaceRange(
-				serializeInline(doc.slice(range.fromOffset, toOffset), body),
+				replacement,
 				editor.offsetToPos(range.fromOffset),
 				editor.offsetToPos(toOffset),
 			);
+			// 光标停在整条批注之后：标记马上就藏起来，不用再点一下别的地方
+			editor.setCursor(editor.offsetToPos(range.fromOffset + replacement.length));
 			this.persist(editor, range);
 			return;
 		}
@@ -454,10 +667,11 @@ export default class LildogAnnotatePlugin extends Plugin {
 						new Notice("这条批注已经变化，请重试");
 						return;
 					}
-					editor.replaceRange(
-						serializeInline(found.text, body),
-						found.from,
-						found.to,
+					const replacement = serializeInline(found.text, body);
+					editor.replaceRange(replacement, found.from, found.to);
+					// 光标挪到批注之后：标记立刻收起，不用再点别的地方
+					editor.setCursor(
+						editor.offsetToPos(editor.posToOffset(found.from) + replacement.length),
 					);
 				} else {
 					if (!current.includes("[!lildog]")) {
@@ -489,6 +703,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 			}
 			// 只去掉批注，原文留下
 			editor.replaceRange(found.text, found.from, found.to);
+			editor.setCursor(editor.offsetToPos(editor.posToOffset(found.from) + found.text.length));
 			return;
 		}
 
@@ -531,7 +746,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 	// ---------------------------------------------------------------- 设置
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = sanitizeSettings(await this.loadData());
 	}
 
 	async saveSettings(): Promise<void> {
