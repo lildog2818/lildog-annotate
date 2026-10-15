@@ -1,4 +1,5 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
+import { BUILD_ID } from "./build";
 import type LildogAnnotatePlugin from "./main";
 
 export type AnnotationMode = "inline" | "block";
@@ -87,6 +88,12 @@ export class LildogSettingTab extends PluginSettingTab {
 			text:
 				"添加批注：Ctrl/Cmd + Shift + A；也可以右键菜单，或用浮动按钮。" +
 				"快捷键可在「设置 → 快捷键」里搜索「批注」自行修改。",
+		});
+
+		info.createEl("h4", { text: "当前构建" });
+		info.createEl("p", {
+			text: `${BUILD_ID}（版本 ${this.plugin.manifest.version}）。` +
+				"如果这里的时间不是你刚构建的那次，说明 Obsidian 还没重载，改的代码没生效。",
 		});
 	}
 }

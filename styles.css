@@ -5,35 +5,14 @@
 /* --------------------------------------------------------------------------
    批注记号：带批注的文字加一条虚线下划线
    -------------------------------------------------------------------------- */
+/* 批注记号：只要一层高亮底色，干净；想换颜色改这个变量即可 */
 .cm-content .lildog-ann,
-.markdown-rendered mark.lildog-ann {
-	text-decoration: underline dotted var(--text-accent);
-	text-decoration-thickness: 1px;
-	text-underline-offset: 3px;
-	cursor: help;
-}
-
-/* 编辑器里把隐藏注释折叠成的小图标 */
-.lildog-widget {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	vertical-align: text-bottom;
-	margin: 0 2px;
-	padding: 0 3px;
-	background: var(--background-modifier-hover);
+.markdown-rendered mark.lildog-ann,
+.markdown-rendered .lildog-ann {
+	background: var(--lildog-annotate-bg, rgba(126, 122, 245, 0.2));
 	border-radius: var(--radius-s);
-	color: var(--text-accent);
-	cursor: pointer;
-}
-
-.lildog-widget:hover {
-	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
-}
-
-.lildog-widget svg {
-	width: 13px;
-	height: 13px;
+	cursor: help;
+	text-decoration: none;
 }
 
 /* --------------------------------------------------------------------------

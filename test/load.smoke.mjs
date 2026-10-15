@@ -71,6 +71,13 @@ const obsidianStub = {
 	},
 	Setting: class {},
 	Modal: class {},
+	TFile: class {
+		constructor(path) {
+			this.path = path;
+		}
+	},
+	MarkdownView: class {},
+	normalizePath: (path) => path,
 	Notice: class {
 		constructor(message) {
 			notices.push(message);
@@ -82,6 +89,11 @@ const obsidianStub = {
 
 const cmViewStub = {
 	hoverTooltip: (source, options) => ({ kind: "hoverTooltip", source, options }),
+	EditorView: {
+		decorations: {
+			compute: (deps, get) => ({ kind: "EditorView.decorations", deps, get }),
+		},
+	},
 	ViewPlugin: {
 		fromClass: (cls, spec) => ({ kind: "ViewPlugin", cls, spec }),
 	},
@@ -113,6 +125,7 @@ globalThis.document = {
 	addEventListener() {},
 	removeEventListener() {},
 	createElement: () => ({}),
+	querySelectorAll: () => [],
 	body: { createDiv: () => ({}), createEl: () => ({}) },
 };
 globalThis.window = {
@@ -147,8 +160,28 @@ const app = {
 	workspace: {
 		on: () => ({ unsubscribe: () => {} }),
 		getActiveViewOfType: () => null,
+		getLeavesOfType: () => [],
 	},
-	vault: {},
+	vault: {
+		__files: new Map(),
+		getAbstractFileByPath(path) {
+			return this.__files.has(path)
+				? new obsidianStub.TFile(path)
+				: undefined;
+		},
+		async createFolder(path) {
+			this.__files.set(path, { path, __folder: true });
+		},
+		async create(path, content) {
+			this.__files.set(path, { path, content });
+		},
+		async modify(file, content) {
+			this.__files.set(file.path, { path: file.path, content });
+		},
+		async read(file) {
+			return this.__files.get(file.path)?.content ?? "";
+		},
+	},
 };
 
 const plugin = new PluginClass(app, { id: "lildog-annotate", version: "1.0.0" });
@@ -164,11 +197,15 @@ try {
 // ---------------------------------------------------------------- 断言
 
 check(
-	"注册了 3 条命令",
-	commands.length === 3 &&
-		["add-annotation", "edit-annotation", "delete-annotation"].every((id) =>
-			commands.some((c) => c.id === id),
-		),
+	"注册了 5 条命令",
+	commands.length === 5 &&
+		[
+			"add-annotation",
+			"edit-annotation",
+			"delete-annotation",
+			"migrate-legacy",
+			"run-self-check",
+		].every((id) => commands.some((c) => c.id === id)),
 );
 check(
 	"添加批注带默认快捷键",
@@ -193,7 +230,41 @@ check(
 		plugin.settings.showFloatingButton === true &&
 		plugin.settings.hoverPreview === true,
 );
-check("注册了右键菜单监听", true);
+
+// 真跑一次自检命令，确认报告能生成（界面里的诊断通道不能是坏的）
+const selfCheck = commands.find((c) => c.id === "run-self-check");
+let report = "";
+try {
+	await selfCheck.callback();
+	const written = app.vault.__files.get("DSH/lildog-自检报告.md");
+	report = written?.content ?? "";
+} catch (error) {
+	failures.push(`自检命令抛异常：${error?.message ?? error}`);
+}
+
+check("自检报告写进了 DSH 目录", report.length > 0);
+check("报告包含逐窗格探针", report.includes("## 逐窗格探针"));
+check(
+	"报告统计了界面里的批注高亮元素",
+	report.includes(".lildog-ann（批注高亮）元素"),
+);
+check("报告记录了最近一次选中探测", report.includes("最近一次选中文字探测"));
+check("报告记录了插件版本", report.includes("插件版本："));
+check("报告会提示 getSectionInfo 状态", report.includes("getSectionInfo"));
+check("报告带构建指纹", report.includes("加载的构建："));
+
+// 再跑一次：报告要能累积，这样才能编辑视图跑一次、阅读视图再跑一次
+try {
+	await selfCheck.callback();
+} catch (error) {
+	failures.push(`第二次自检抛异常：${error?.message ?? error}`);
+}
+const report2 = app.vault.__files.get("DSH/lildog-自检报告.md")?.content ?? "";
+check("多次自检会累积到同一份报告里", report2.includes("<!-- lildog:run -->"));
+check(
+	"累积后仍然保留最新一次的内容",
+	report2.startsWith(report.split("\n").slice(0, 3).join("\n").slice(0, 20)),
+);
 
 Module._load = originalLoad;
 

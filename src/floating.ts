@@ -1,25 +1,24 @@
-import { EditorPosition, MarkdownView, setIcon } from "obsidian";
-
-export interface SelectionSnapshot {
-	view: MarkdownView;
-	from: EditorPosition;
-	to: EditorPosition;
-	text: string;
-}
+import { MarkdownView, setIcon } from "obsidian";
 
 /**
  * 选中文字后浮在选区上方的「批注」小按钮。
- * 只负责画按钮和报告点击，具体写什么由调用方决定。
+ *
+ * 锚点用**源码偏移**而不是编辑器位置：阅读视图、编辑器里的表格（块级 widget）
+ * 都拿不到编辑器选区，只能靠 DOM 里的文字反查源码，偏移是唯一通用的坐标。
  */
+export interface SelectionSnapshot {
+	view: MarkdownView;
+	/** 选中的文字 */
+	text: string;
+	fromOffset: number;
+	toOffset: number;
+}
+
 export class FloatingAnnotateButton {
 	private el: HTMLElement | null = null;
 	private snapshot: SelectionSnapshot | null = null;
 
 	constructor(private onAction: (snapshot: SelectionSnapshot) => void) {}
-
-	get visible(): boolean {
-		return this.el !== null;
-	}
 
 	/** 点击事件是否发生在这个按钮上 */
 	contains(target: EventTarget | null): boolean {
@@ -34,7 +33,7 @@ export class FloatingAnnotateButton {
 			const icon = el.createSpan({ cls: "lildog-float-icon" });
 			setIcon(icon, "message-square-plus");
 			el.createSpan({ cls: "lildog-float-text", text: "批注" });
-			// 按下时不让编辑器失去选区
+			// 按下时不让编辑器/阅读视图失去选区
 			el.addEventListener("mousedown", (evt) => evt.preventDefault());
 			el.addEventListener("click", (evt) => {
 				evt.preventDefault();
@@ -51,7 +50,7 @@ export class FloatingAnnotateButton {
 		const half = 44;
 		const left = Math.min(
 			Math.max(8, rect.left + rect.width / 2 - half),
-			window.innerWidth - half * 2 - 8,
+			Math.max(8, window.innerWidth - half * 2 - 8),
 		);
 		const top = rect.top - 40 < 8 ? rect.bottom + 8 : rect.top - 40;
 		el.style.left = `${left}px`;

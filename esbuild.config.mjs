@@ -14,6 +14,9 @@ const context = await esbuild.context({
 	banner: {
 		js: banner,
 	},
+	define: {
+		__LILDOG_BUILD__: JSON.stringify(new Date().toISOString().slice(0, 19)),
+	},
 	entryPoints: ["src/main.ts"],
 	bundle: true,
 	external: [

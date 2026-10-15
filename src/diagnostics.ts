@@ -1,0 +1,51 @@
+/**
+ * 运行时诊断计数。
+ *
+ * 插件的装饰/后处理器都跑在 Obsidian 的界面里，出问题时日志拿不到，
+ * 所以把关键中间状态记下来，由「运行自检」命令写进库里的报告文件。
+ */
+
+export interface DiagnosticCounters {
+	/** 编辑器装饰重建次数（每次输入都会加，能涨说明扩展活着） */
+	editorBuilds: number;
+	/** 编辑器装饰构建时捕获到的异常信息 */
+	editorLastError: string | null;
+	/** 最近一次构建时在当前文档里解析到的行内批注数 */
+	editorAnnotationsSeen: number;
+	/** 阅读视图后处理器被调用的次数 */
+	postProcessorRuns: number;
+	/** getSectionInfo 返回空的次数 */
+	sectionInfoMissing: number;
+	/** 后处理器见过的 <mark> 总数 */
+	marksFound: number;
+	/** 成功配对上的批注数 */
+	annotationsMatched: number;
+	/** 走整篇兜底读取的次数 */
+	fallbackReads: number;
+	/** 最近一次「选中文字」探测：浮动按钮为什么出现/没出现 */
+	lastSelection: string;
+}
+
+export const diag: DiagnosticCounters = {
+	editorBuilds: 0,
+	editorLastError: null,
+	editorAnnotationsSeen: 0,
+	postProcessorRuns: 0,
+	sectionInfoMissing: 0,
+	marksFound: 0,
+	annotationsMatched: 0,
+	fallbackReads: 0,
+	lastSelection: "（还没有在编辑器里选过文字）",
+};
+
+export function resetDiagnostics(): void {
+	diag.editorBuilds = 0;
+	diag.editorLastError = null;
+	diag.editorAnnotationsSeen = 0;
+	diag.postProcessorRuns = 0;
+	diag.sectionInfoMissing = 0;
+	diag.marksFound = 0;
+	diag.annotationsMatched = 0;
+	diag.fallbackReads = 0;
+	diag.lastSelection = "（还没有在编辑器里选过文字）";
+}

@@ -21,13 +21,17 @@
 ### 行内批注（默认）
 
 ```markdown
-反向传播懂了，但==梯度消失==<!-- lildog: 为什么层数一深就衰减？ -->没想通。
+反向传播懂了，但<!--lildog: 为什么层数一深就衰减？-->梯度消失<!--/lildog-->没想通。
 ```
 
-- 选中的文字变成 `==高亮==`，批注藏在后面的 HTML 注释里，阅读视图里不显示，正文干净
-- 编辑器里那段注释会折叠成一个 💬 小图标，不会横在句子里；点一下图标，光标落进批注、原始标记露出来，就能直接改
-- 插件给这类高亮加一条虚线下划线，提示「这里是有批注的」
-- 选中的文字跨行、或者本身含 `==` 时，插件自动改用段落批注
+- 原文被两段标记包住，**一个字都没被改动**；被批注的文字由插件自己渲染成高亮 + 虚线下划线
+- 两段标记在编辑器和阅读视图里都看不见；光标碰到这条批注时才会露出来，方便直接改
+- 高亮就是悬停的落点，鼠标停上去弹出批注内容
+
+> [!IMPORTANT] 为什么不用 `==原文==` 包住
+> Obsidian 自己解析不了跨等号的 `==a = b==`（实时预览里配不上对），落单的 `==` 还会跟文档后面别的 `==` 配对，把一大段文字错误地点亮。批注公式、代码时这个坑必踩，所以高亮由插件自己渲染，不再依赖 Obsidian 的行内语法。副作用是：含 `=`、反引号、甚至 `==` 的文字都能随便批注了。
+>
+> v1.0 / v1.1 写过旧格式，插件仍然能读、能编辑、能删除；命令面板里有「**把旧格式批注转成新格式**」一键迁移（会自动把选区漏掉的收尾反引号补回来，避免代码块被劈开）。
 
 ### 段落批注
 
@@ -88,17 +92,23 @@ npm run dev       # 开发模式，改动自动重新打包
 | 选中文字后浮出批注按钮 | 关掉就只用快捷键和右键菜单 |
 | 悬停显示批注内容 | 关掉则不弹预览 |
 
+## 出问题时
+
+命令面板里跑 **「Lildog Annotate: 运行自检」**，它会把插件的运行时状态写成一份报告：
+`DSH/lildog-自检报告.md`。里面有编辑器装饰有没有建成功、阅读视图后处理器跑了没、
+`getSectionInfo` 有没有返回、`<mark>` 配对上了几个等。把这份报告发给 AI，不用靠猜。
+
 ## 已知限制
 
 - 行内批注不支持跨行选区（会自动改用段落批注）
-- 阅读视图的悬停预览靠「原文配对」实现：同一段落里有两条**文字完全相同**的批注时，第二条可能配不上
-- 阅读视图只支持行内批注的悬停预览；段落批注本来就是直接显示的
+- 阅读视图的悬停预览靠「按原文找 DOM 文字」实现：同一段落里有两条**文字完全相同**的批注时，第二条可能配不上
+- 段落批注本来就是直接显示的，不需要悬停
 
 ## English
 
 Lildog Annotate lets you select text in Obsidian and attach a note to it. Annotations are stored as **plain text in the markdown file itself**, so they survive without the plugin, are greppable, and any AI assistant can read them.
 
-- Inline: `==highlighted text==<!-- lildog: your note -->`
+- Inline: `<!--lildog: your note-->selected text<!--/lildog-->` — the surrounding text is never modified; the highlight is drawn by the plugin, so formulas and code containing `=` are safe
 - Block: a `> [!lildog] 批注` callout after the paragraph
 
 Add an annotation with `Ctrl/Cmd + Shift + A`, the context menu, or the floating button that appears over a selection. Hover a highlighted passage to read the note. The user interface is in Chinese.

@@ -5,6 +5,9 @@ main.js
 # dependencies
 node_modules/
 
+# test scratch
+test/.tmp/
+
 # obsidian
 data.json
 .obsidian/
