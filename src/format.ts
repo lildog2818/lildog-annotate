@@ -26,6 +26,12 @@ export interface InlineAnnotation {
 	text: string;
 	/** 批注内容 */
 	body: string;
+	/** 高亮部分的起点（`==` 之后） */
+	textFrom: number;
+	/** 高亮部分的终点（后一个 `==` 之前） */
+	textTo: number;
+	/** 隐藏注释的起点（`<!--` 的位置） */
+	commentFrom: number;
 }
 
 /** 段落批注（以行为单位） */
@@ -62,11 +68,17 @@ export function findInlineAnnotations(doc: string): InlineAnnotation[] {
 	const out: InlineAnnotation[] = [];
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(doc)) !== null) {
+		const textFrom = m.index + 2;
+		const textTo = textFrom + m[1].length;
+		const commentRel = m[0].indexOf("<!--", textTo - m.index);
 		out.push({
 			from: m.index,
 			to: m.index + m[0].length,
 			text: m[1],
 			body: m[2],
+			textFrom,
+			textTo,
+			commentFrom: commentRel === -1 ? textTo + 2 : m.index + commentRel,
 		});
 		if (m.index === re.lastIndex) re.lastIndex++;
 	}

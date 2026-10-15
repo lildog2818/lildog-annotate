@@ -13,6 +13,29 @@
 	cursor: help;
 }
 
+/* 编辑器里把隐藏注释折叠成的小图标 */
+.lildog-widget {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	vertical-align: text-bottom;
+	margin: 0 2px;
+	padding: 0 3px;
+	background: var(--background-modifier-hover);
+	border-radius: var(--radius-s);
+	color: var(--text-accent);
+	cursor: pointer;
+}
+
+.lildog-widget:hover {
+	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.lildog-widget svg {
+	width: 13px;
+	height: 13px;
+}
+
 /* --------------------------------------------------------------------------
    编辑器里的悬停预览
    -------------------------------------------------------------------------- */

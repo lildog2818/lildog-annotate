@@ -13,8 +13,8 @@ import { AnnotateModal } from "./modal";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
 import {
+	createEditorDecorations,
 	createHoverExtension,
-	createUnderlineExtension,
 	decorateReadingView,
 } from "./hover";
 import { DEFAULT_SETTINGS, LildogSettingTab } from "./settings";
@@ -47,7 +47,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 
 		// 批注记号 + 悬停预览（编辑器）
 		this.registerEditorExtension([
-			createUnderlineExtension(),
+			createEditorDecorations(),
 			createHoverExtension(() => this.settings.hoverPreview),
 		]);
 		// 悬停预览（阅读视图）

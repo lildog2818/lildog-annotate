@@ -32,6 +32,16 @@ check(
 	inlineSample.slice(found[0]!.from, found[0]!.to),
 	"==梯度消失==<!-- lildog: 为什么会衰减？ -->",
 );
+check(
+	"行内：高亮区间的偏移正确",
+	inlineSample.slice(found[0]!.textFrom, found[0]!.textTo),
+	"梯度消失",
+);
+check(
+	"行内：隐藏注释的起点正确",
+	inlineSample.slice(found[0]!.commentFrom, found[0]!.to),
+	"<!-- lildog: 为什么会衰减？ -->",
+);
 
 check(
 	"行内：生成",

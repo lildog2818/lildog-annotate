@@ -25,6 +25,7 @@
 ```
 
 - 选中的文字变成 `==高亮==`，批注藏在后面的 HTML 注释里，阅读视图里不显示，正文干净
+- 编辑器里那段注释会折叠成一个 💬 小图标，不会横在句子里；点一下图标，光标落进批注、原始标记露出来，就能直接改
 - 插件给这类高亮加一条虚线下划线，提示「这里是有批注的」
 - 选中的文字跨行、或者本身含 `==` 时，插件自动改用段落批注
 
@@ -73,7 +74,7 @@ git clone https://github.com/lildog2818/lildog-annotate.git
 cd lildog-annotate
 npm install
 npm run build     # 类型检查 + 打包出 main.js
-npm test          # 批注格式层的单元测试
+npm test          # 批注格式层单元测试 + 加载冒烟测试（先 build）
 npm run dev       # 开发模式，改动自动重新打包
 ```
 
