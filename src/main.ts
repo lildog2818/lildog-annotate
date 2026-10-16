@@ -20,7 +20,11 @@ import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
-import { createAtomicRanges, createCursorGuard } from "./decorations";
+import {
+	createAtomicRanges,
+	createCursorGuard,
+	createWidgetHighlighter,
+} from "./decorations";
 import { createEditorDecorations, decorateReadingView } from "./hover";
 import { HoverCard } from "./hovercard";
 import type { HoverTarget } from "./hovercard";
@@ -88,6 +92,8 @@ export default class LildogAnnotatePlugin extends Plugin {
 	settings: LildogSettings = { ...DEFAULT_SETTINGS };
 	private floating: FloatingAnnotateButton | null = null;
 	private hoverCard: HoverCard | null = null;
+	/** 刚写完批注的一小段时间里不弹浮窗（见 persist） */
+	private hoverSuppressedUntil = 0;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -103,6 +109,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 			createEditorDecorations(),
 			createAtomicRanges(),
 			createCursorGuard(),
+			createWidgetHighlighter(),
 		]);
 		// 阅读视图：给每个段落打上行号范围（阅读视图里按文字反查源码要用），
 		// 并把批注对应的文字找出来上色、记下源码偏移
@@ -186,6 +193,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 		this.hoverCard = new HoverCard({
 			fontSize: () => this.settings.cardFontSize,
 			onSave: (target, body) => this.saveFromCard(target, body),
+			onDelete: (target) => this.deleteFromCard(target),
 		});
 		this.register(() => this.hoverCard?.destroy());
 
@@ -280,6 +288,9 @@ export default class LildogAnnotatePlugin extends Plugin {
 			return;
 		}
 		if (!this.settings.hoverPreview) return;
+		// 刚保存/刚删完的一小段时间里不弹：否则卡片一消失，鼠标底下那条高亮
+		// 会立刻把浮窗又唤回来，看起来就像「回车没能关掉浮窗」
+		if (Date.now() < this.hoverSuppressedUntil) return;
 
 		const el = node.closest(".lildog-ann") as HTMLElement | null;
 		if (!el) return;
@@ -357,6 +368,37 @@ export default class LildogAnnotatePlugin extends Plugin {
 			view: target.view,
 		});
 		diag.hoverEdits++;
+	}
+
+	/** 浮窗里点了删除（或把内容清空后回车）：去掉这条批注，原文留下 */
+	private deleteFromCard(target: HoverTarget): void {
+		const editor = target.view.editor;
+		const found = this.findAnnotationAt(editor, target);
+		if (!found) {
+			new Notice("这条批注已经变化，请重新悬停后再删");
+			return;
+		}
+		this.deleteAnnotation(editor, found, target.view);
+		new Notice("已删除这条批注");
+	}
+
+	/** 按源码区间在编辑器里找回这条批注（浮窗上的偏移可能已经过期） */
+	private findAnnotationAt(
+		editor: Editor,
+		target: { from: number; to: number },
+	): FoundAnnotation | null {
+		const doc = editor.getValue();
+		const ann = findInlineAnnotations(doc).find(
+			(item) => item.from === target.from && item.to === target.to,
+		);
+		if (!ann) return null;
+		return {
+			kind: "inline",
+			from: editor.offsetToPos(ann.from),
+			to: editor.offsetToPos(ann.to),
+			text: ann.text,
+			body: ann.body,
+		};
 	}
 
 	/** 高亮元素属于哪个 Markdown 窗格（编辑器可能被拖到别的叶子里） */
@@ -518,11 +560,47 @@ export default class LildogAnnotatePlugin extends Plugin {
 			new Notice("选区跨行（或含有注释起始符），已改用段落批注");
 		}
 
+		// 记下当前看到哪儿了：弹窗关掉（尤其是没保存那次）以后要还回去，
+		// 否则焦点回到编辑器时会滚到光标那儿去 —— 看着就像「光标跳到笔记开头」
+		const view = range.view;
+		const scroll = view ? view.editor.getScrollInfo() : null;
+		const previewScroller =
+			view && view.getMode() === "preview"
+				? (view.containerEl.querySelector(".markdown-preview-view") as HTMLElement | null)
+				: null;
+		const previewTop = previewScroller?.scrollTop ?? null;
+
 		new AnnotateModal(this.app, {
 			title: mode === "inline" ? "添加行内批注" : "添加段落批注",
 			quote: range.text,
 			onSubmit: (body) => this.insertAnnotation(editor, mode, range, body),
+			onClose: (saved) => {
+				if (saved) return;
+				this.restoreScroll(view ?? null, scroll, previewScroller, previewTop);
+			},
 		}).open();
+	}
+
+	/** 把取消弹窗前的滚动位置还回去（推迟一点，等 Obsidian 把焦点还完再摆） */
+	private restoreScroll(
+		view: MarkdownView | null,
+		scroll: { top: number; left: number } | null,
+		previewScroller: HTMLElement | null,
+		previewTop: number | null,
+	): void {
+		const restore = () => {
+			try {
+				if (view && scroll) view.editor.scrollTo(scroll.left, scroll.top);
+				if (previewScroller && previewTop !== null) {
+					previewScroller.scrollTop = previewTop;
+				}
+			} catch {
+				// 视图可能已经被关掉了，忽略
+			}
+		};
+		// 摆几次：Obsidian 把焦点还给编辑器时会「滚到光标那儿」，
+		// 只摆一次会被它盖掉（笔记越长越明显）
+		for (const delay of [30, 160, 420]) window.setTimeout(restore, delay);
 	}
 
 	private insertAnnotation(
@@ -599,6 +677,9 @@ export default class LildogAnnotatePlugin extends Plugin {
 	 * Obsidian 不会自动保存，得直接写一遍文件（内容和编辑器内存一致）。
 	 */
 	private persist(editor: Editor, range: SourceRange): void {
+		// 刚写完/删完的这一刻别再弹浮窗：卡片一消失，鼠标底下往往正好是
+		// 另一条高亮，浮窗会「啪」地又冒出来，看着就像没关掉
+		this.hoverSuppressedUntil = Date.now() + 450;
 		const view = range.view;
 		if (!view) return;
 		if (view.getMode() === "preview" && view.file) {
@@ -676,8 +757,14 @@ export default class LildogAnnotatePlugin extends Plugin {
 			title: found.kind === "inline" ? "编辑行内批注" : "编辑段落批注",
 			quote: found.text,
 			value: found.body,
+			// 空内容 = 想删掉它；弹窗里也有明确的「删除这条批注」按钮
+			onDelete: () => this.deleteAnnotation(editor, found),
 			onSubmit: (body) => {
 				const current = editor.getRange(found.from, found.to);
+				const view =
+					this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
+				const fromOffset = editor.posToOffset(found.from);
+				const toOffset = editor.posToOffset(found.to);
 				if (found.kind === "inline") {
 					if (!current.includes("lildog")) {
 						new Notice("这条批注已经变化，请重试");
@@ -686,9 +773,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 					const replacement = serializeInline(found.text, body);
 					editor.replaceRange(replacement, found.from, found.to);
 					// 光标挪到批注之后：标记立刻收起，不用再点别的地方
-					editor.setCursor(
-						editor.offsetToPos(editor.posToOffset(found.from) + replacement.length),
-					);
+					editor.setCursor(editor.offsetToPos(fromOffset + replacement.length));
 				} else {
 					if (!current.includes("[!lildog]")) {
 						new Notice("这条批注已经变化，请重试");
@@ -700,16 +785,30 @@ export default class LildogAnnotatePlugin extends Plugin {
 						found.to,
 					);
 				}
+				// 阅读视图里必须自己写一遍文件（编辑器不是当前显示的视图）
+				this.persist(editor, {
+					text: found.text,
+					fromOffset,
+					toOffset,
+					view,
+				});
 			},
 		}).open();
 	}
 
-	private deleteAnnotation(editor: Editor, target?: FoundAnnotation): void {
+	private deleteAnnotation(
+		editor: Editor,
+		target?: FoundAnnotation,
+		view?: MarkdownView,
+	): void {
 		const found = target ?? this.findAnnotation(editor);
 		if (!found) {
 			new Notice("光标所在位置没有批注");
 			return;
 		}
+		// 阅读视图里编辑器不是当前显示的视图，Obsidian 不会自动保存，
+		// 得自己写一遍文件 —— 否则「删了但文件里还在」，下次打开又冒出来
+		const fileView = view ?? this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
 
 		if (found.kind === "inline") {
 			const current = editor.getRange(found.from, found.to);
@@ -717,12 +816,21 @@ export default class LildogAnnotatePlugin extends Plugin {
 				new Notice("这条批注已经变化，请重试");
 				return;
 			}
+			const fromOffset = editor.posToOffset(found.from);
+			const toOffset = editor.posToOffset(found.to);
 			// 只去掉批注，原文留下
 			editor.replaceRange(found.text, found.from, found.to);
-			editor.setCursor(editor.offsetToPos(editor.posToOffset(found.from) + found.text.length));
+			editor.setCursor(editor.offsetToPos(fromOffset + found.text.length));
+			this.persist(editor, {
+				text: found.text,
+				fromOffset,
+				toOffset,
+				view: fileView,
+			});
 			return;
 		}
 
+		const fromOffset = editor.posToOffset(found.from);
 		const lines = editor.getValue().split("\n");
 		if (found.to.line + 1 < lines.length) {
 			editor.replaceRange("", found.from, {
@@ -732,6 +840,12 @@ export default class LildogAnnotatePlugin extends Plugin {
 		} else {
 			editor.replaceRange("", found.from, found.to);
 		}
+		this.persist(editor, {
+			text: found.text,
+			fromOffset,
+			toOffset: fromOffset,
+			view: fileView,
+		});
 	}
 
 	// ---------------------------------------------------------------- 迁移

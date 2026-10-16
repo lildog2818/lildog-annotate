@@ -290,10 +290,99 @@ if (markerSpot) {
 	check("点完标记仍然藏着", afterClick.leaked === 0, `露出 ${afterClick.leaked} 行`);
 }
 
+// ---------------------------------------------------------------- 1e. 高亮连成一条
+
+console.log("\n【1e】高亮要连成一条（行内代码 / 公式不能各画各的底）");
+const band = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	// 夹着公式/行内代码的那几条在笔记靠后的位置，先滚过去（实时预览是懒渲染的）
+	const lines = editor.getValue().split(String.fromCharCode(10));
+	const line = lines.findIndex((item) => item.includes("$" + String.fromCharCode(92) + "omega_c$"));
+	if (line >= 0) {
+		editor.scrollIntoView({ from: { line, ch: 0 }, to: { line: line + 1, ch: 0 } }, false);
+		await sleep(700);
+	}
+	const all = Array.from(view.containerEl.querySelectorAll(".cm-content .lildog-ann"));
+	const withKids = all.filter((el) => el.querySelector("*"));
+	const ann = withKids[0];
+	if (!ann) return { ok: false, candidates: all.length, line };
+	const annBg = getComputedStyle(ann).backgroundColor;
+	const children = Array.from(ann.querySelectorAll("*"));
+	const different = children
+		.map((el) => ({
+			tag: el.tagName.toLowerCase() + "." + String(el.className).split(" ")[0],
+			bg: getComputedStyle(el).backgroundColor
+		}))
+		.filter(
+			(item) =>
+				item.bg &&
+				item.bg !== "rgba(0, 0, 0, 0)" &&
+				item.bg !== "transparent" &&
+				item.bg !== annBg
+		);
+	return {
+		ok: true,
+		annBg,
+		text: (ann.textContent ?? "").slice(0, 30),
+		childCount: children.length,
+		candidates: withKids.length,
+		different
+	};
+})()`);
+check(
+	"批注里的行内代码 / 公式不会画出另一种底色（紫带连成一条）",
+	band.ok && band.different.length === 0,
+	band.ok
+		? `「${band.text}」里 ${band.childCount} 个子元素（共 ${band.candidates} 条夹着东西的批注），底色不同的 ${band.different.length} 个${band.different.length ? `：${JSON.stringify(band.different)}` : ""}`
+		: "样例笔记里没有夹着公式/行内代码的批注，这条检查没意义",
+);
+await shoot("04-公式与代码夹在批注里");
+
+// 批注以公式开头时，公式是 CM6 盖不到的 widget（还是高亮的兄弟节点），
+// 得靠插件后处理补类，否则紫带中间缺一块 —— 用户报的「断断续续」
+const widgetBand = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	const lines = editor.getValue().split(String.fromCharCode(10));
+	const line = lines.findIndex((item) => item.includes("omega_c"));
+	if (line >= 0) {
+		editor.scrollIntoView({ from: { line, ch: 0 }, to: { line: line + 1, ch: 0 } }, false);
+		await sleep(800);
+	}
+	const widgets = Array.from(
+		view.containerEl.querySelectorAll(".cm-content .math, .cm-content .cm-inline-math"),
+	);
+	const rows = widgets.map((el) => ({
+		cls: String(el.className),
+		bg: getComputedStyle(el).backgroundColor,
+		text: (el.textContent ?? "").slice(0, 8)
+	}));
+	const painted = rows.filter((row) => row.cls.includes("lildog-ann-widget"));
+	return {
+		total: rows.length,
+		painted: painted.length,
+		rows,
+		bandBg: painted[0]?.bg ?? null,
+		wrongBg: painted.filter((row) => row.bg !== painted[0]?.bg).length
+	};
+})()`);
+check(
+	"批注里的公式 widget 也被补上同一层底色（紫带不断）",
+	widgetBand.painted > 0 && widgetBand.wrongBg === 0,
+	widgetBand.painted > 0
+		? `命中 ${widgetBand.painted}/${widgetBand.total} 个公式/部件，底色 ${widgetBand.bandBg}，不一致的 ${widgetBand.wrongBg} 个`
+		: `这一屏没渲染出公式 widget（共 ${widgetBand.total} 个），滚到第 7 节再看`,
+);
+
 // ---------------------------------------------------------------- 2. 悬停浮窗
 
 console.log("\n【2】悬停浮窗（直接改批注 + 回车即收）");
-await cdp.hover(marker.x, marker.y);
+// 上面的检查滚动过编辑器，坐标要重新量（用当时那一刻的高亮位置）
+const cardSpot = (await highlightSpot(".cm-content .lildog-ann")) ?? marker;
+await cdp.hover(cardSpot.x, cardSpot.y);
 await sleep(500);
 
 const card = await evaluate(`(() => {
@@ -378,37 +467,44 @@ const highlightCount = await evaluate(
 );
 const hoverFailures = [];
 for (let i = 0; i < highlightCount; i++) {
-	// 每轮现取坐标：文档在这一段里被改过，之前量的位置已经不准了
-	await evaluate(`(() => {
-		const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
-		el?.scrollIntoView({ block: "center" });
-		return true;
-	})()`);
-	await sleep(250);
-	const spot = await evaluate(`(() => {
-		const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
-		if (!el) return null;
-		const rect = Array.from(el.getClientRects())[0] ?? el.getBoundingClientRect();
-		return {
-			text: el.textContent,
-			segments: el.getClientRects().length,
-			x: Math.round(rect.left + Math.min(rect.width / 2, 20)),
-			y: Math.round(rect.top + rect.height / 2)
-		};
-	})()`);
-	if (!spot) continue;
-	await cdp.mouse("mouseMoved", 5, 5);
-	await sleep(150);
-	await cdp.hover(spot.x, spot.y);
-	await sleep(450);
-	const cardText = await evaluate(`(() => {
-		const el = document.querySelector(".lildog-card");
-		if (!el || el.style.display === "none") return "";
-		return el.querySelector(".lildog-card-body")?.textContent ?? "";
-	})()`);
-	if (cardText.trim().length === 0) {
-		hoverFailures.push(`${spot.text}${spot.segments > 1 ? "(折行)" : ""}`);
+	// 每轮现取坐标：文档在这一段里被改过，而且实时预览是懒渲染的，
+	// 滚动之后 DOM 要过一会儿才稳；没弹出来就重试一次
+	let ok = false;
+	let lastText = "";
+	let segments = 1;
+	for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+		await evaluate(`(() => {
+			const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
+			el?.scrollIntoView({ block: "center" });
+			return true;
+		})()`);
+		await sleep(attempt === 0 ? 350 : 600);
+		const spot = await evaluate(`(() => {
+			const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
+			if (!el) return null;
+			const rect = Array.from(el.getClientRects())[0] ?? el.getBoundingClientRect();
+			return {
+				text: el.textContent,
+				segments: el.getClientRects().length,
+				x: Math.round(rect.left + Math.min(rect.width / 2, 20)),
+				y: Math.round(rect.top + rect.height / 2)
+			};
+		})()`);
+		if (!spot) break;
+		lastText = spot.text;
+		segments = spot.segments;
+		await cdp.mouse("mouseMoved", 5, 5);
+		await sleep(150);
+		await cdp.hover(spot.x, spot.y);
+		await sleep(500);
+		const cardText = await evaluate(`(() => {
+			const el = document.querySelector(".lildog-card");
+			if (!el || el.style.display === "none") return "";
+			return el.querySelector(".lildog-card-body")?.textContent ?? "";
+		})()`);
+		ok = cardText.trim().length > 0;
 	}
+	if (!ok) hoverFailures.push(`${lastText}${segments > 1 ? "(折行)" : ""}`);
 }
 check(
 	"每一条高亮都能悬停弹出浮窗（含折行的）",
@@ -526,15 +622,18 @@ console.log("\n【5】同一段文字出现多次：在哪选就在哪批注");
 const occurrence = await evaluate(`(async () => {
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
-	// 阅读视图是懒渲染的：滚到第 2 节，那几段才会出现在 DOM 里
-	const lines = view.editor.getValue().split(String.fromCharCode(10));
-	const line = lines.findIndex((item) => item.startsWith("## 2."));
-	if (line >= 0 && view.previewMode?.applyScroll) {
-		view.previewMode.applyScroll(Math.max(0, line - 1));
-		await sleep(900);
-	}
 	const root = view.containerEl.querySelector(".markdown-reading-view");
 	if (!root) return { error: "没有阅读视图" };
+	// 阅读视图是懒渲染的：一点点往下滚，直到那几段真的出现在 DOM 里
+	const preview = view.containerEl.querySelector(".markdown-preview-view");
+	const hasText = () => (root.textContent ?? "").includes("梯度消失");
+	if (preview) {
+		preview.scrollTop = 0;
+		for (let i = 0; i < 60 && !hasText(); i++) {
+			preview.scrollTop += 260;
+			await sleep(120);
+		}
+	}
 	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
 	const hits = [];
 	let node;
@@ -550,7 +649,7 @@ const occurrence = await evaluate(`(async () => {
 	if (hits.length < 3) return { error: "没凑够三处「梯度消失」，实际 " + hits.length };
 	const third = hits[2];
 	third.node.parentElement.scrollIntoView({ block: "center" });
-	await sleep(200);
+	await sleep(400);
 	const range = document.createRange();
 	range.setStart(third.node, third.index);
 	range.setEnd(third.node, third.index + 4);
@@ -643,6 +742,231 @@ if (!occurrence.error) {
 		);
 	}
 }
+
+// ---------------------------------------------------------------- 6. 删除批注
+// 用户反馈：改批注时把内容删光，点保存没法保存，也找不到删除的地方。
+// 现在：清空内容后主按钮变「删除批注」，弹窗和浮窗里也各有一个删除按钮。
+
+console.log("\n【6】删除批注");
+const TEMP_LINE = "\n临时删除测试：<!--lildog: 待删除-->这段文字会被删掉<!--/lildog-->\n";
+await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const app = window.app;
+	const file = app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+	const view = app.workspace.getLeavesOfType("markdown")[0].view;
+	if (view.getMode() !== "source") {
+		app.commands.executeCommandById("markdown:toggle-preview");
+		await sleep(1400);
+	}
+	const text = await app.vault.read(file);
+	await app.vault.modify(file, text + ${JSON.stringify(TEMP_LINE)});
+	await sleep(700);
+	view.editor.setValue(await app.vault.read(file));
+	await sleep(500);
+	// 光标放进这条临时批注里，然后用「编辑光标处的批注」命令打开弹窗
+	const doc = view.editor.getValue();
+	const at = doc.indexOf("这段文字会被删掉");
+	view.editor.setSelection(view.editor.offsetToPos(at), view.editor.offsetToPos(at + 3));
+	await sleep(300);
+	app.commands.executeCommandById("lildog-annotate:edit-annotation");
+	await sleep(700);
+	return true;
+})()`);
+
+const editModal = await evaluate(`(() => {
+	const modal = document.querySelector(".lildog-modal");
+	if (!modal) return { open: false };
+	const buttons = Array.from(modal.querySelectorAll(".lildog-modal-buttons button"));
+	const submit = modal.querySelector(".lildog-modal-submit");
+	return {
+		open: true,
+		hasDelete: buttons.some((b) => (b.textContent ?? "").includes("删除这条批注")),
+		primary: submit?.textContent ?? "",
+		buttons: buttons.map((b) => b.textContent ?? "")
+	};
+})()`);
+check("编辑批注的弹窗打开了", editModal.open, editModal.buttons?.join(" / "));
+check("弹窗里有明确的「删除这条批注」按钮", editModal.hasDelete);
+check("内容没删光时主按钮还是「保存」", editModal.primary === "保存", editModal.primary);
+
+// 把内容删光：主按钮应该变成「删除批注」，不再卡在「内容不能为空」
+await evaluate(`(() => {
+	const ta = document.querySelector(".lildog-modal textarea.lildog-textarea");
+	ta.value = "";
+	ta.dispatchEvent(new Event("input", { bubbles: true }));
+	return true;
+})()`);
+await sleep(300);
+const emptied = await evaluate(`(() => {
+	const modal = document.querySelector(".lildog-modal");
+	const submit = modal.querySelector(".lildog-modal-submit");
+	const r = submit.getBoundingClientRect();
+	return {
+		label: submit.textContent ?? "",
+		warning: submit.classList.contains("mod-warning"),
+		x: r.left + r.width / 2,
+		y: r.top + r.height / 2
+	};
+})()`);
+check(
+	"把内容删光后，主按钮自己变成「删除批注」",
+	emptied.label === "删除批注" && emptied.warning,
+	emptied.label,
+);
+
+await cdp.click(emptied.x, emptied.y);
+await sleep(900);
+const deleted = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const app = window.app;
+	const file = app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+	let text = "";
+	// 编辑器里改完到落盘有一小段延迟，轮询等一下
+	for (let i = 0; i < 16; i++) {
+		text = await app.vault.read(file);
+		if (!text.includes("待删除")) break;
+		await sleep(250);
+	}
+	const view = app.workspace.getLeavesOfType("markdown")[0].view;
+	return {
+		onDisk: !text.includes("待删除"),
+		keptText: text.includes("这段文字会被删掉"),
+		modalGone: !document.querySelector(".lildog-modal"),
+		inEditor: !view.editor.getValue().includes("待删除")
+	};
+})()`);
+check(
+	"点「删除批注」后批注从笔记里消失了",
+	deleted.onDisk && deleted.inEditor && deleted.modalGone,
+	`文件里没了=${deleted.onDisk}、编辑器里没了=${deleted.inEditor}、弹窗关闭=${deleted.modalGone}`,
+);
+check("被批注的原文留下来了（只删批注，不删原文）", deleted.keptText);
+
+// 浮窗里的删除入口：再放一条临时批注，用悬停浮窗删掉
+console.log("\n【6b】浮窗里也能删");
+await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const app = window.app;
+	const file = app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+	const view = app.workspace.getLeavesOfType("markdown")[0].view;
+	const text = await app.vault.read(file);
+	await app.vault.modify(file, text + ${JSON.stringify(
+		"\n浮窗删除测试：<!--lildog: 浮窗里删掉-->这段用浮窗删<!--/lildog-->\n",
+	)});
+	await sleep(700);
+	view.editor.setValue(await app.vault.read(file));
+	await sleep(600);
+	const el = Array.from(view.containerEl.querySelectorAll(".cm-content .lildog-ann")).find((item) =>
+		(item.textContent ?? "").includes("这段用浮窗删")
+	);
+	el?.scrollIntoView({ block: "center" });
+	await sleep(400);
+	const rect = Array.from(el.getClientRects())[0];
+	return JSON.stringify({ x: rect.left + Math.min(rect.width / 2, 20), y: rect.top + rect.height / 2 });
+})()`);
+const floatSpot = JSON.parse(
+	await evaluate(`(() => {
+		const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+		const el = Array.from(view.containerEl.querySelectorAll(".cm-content .lildog-ann")).find((item) =>
+			(item.textContent ?? "").includes("这段用浮窗删")
+		);
+		if (!el) return JSON.stringify(null);
+		const rect = Array.from(el.getClientRects())[0];
+		return JSON.stringify({ x: rect.left + Math.min(rect.width / 2, 20), y: rect.top + rect.height / 2 });
+	})()`),
+);
+if (floatSpot) {
+	await cdp.hover(floatSpot.x, floatSpot.y);
+	await sleep(600);
+	const editBtn = await evaluate(`(() => {
+		const el = document.querySelector(".lildog-card-btn");
+		if (!el) return null;
+		const r = el.getBoundingClientRect();
+		return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+	})()`);
+	if (editBtn) {
+		await cdp.click(editBtn.x, editBtn.y);
+		await sleep(400);
+		const cardDelete = await evaluate(`(() => {
+			const el = document.querySelector(".lildog-card-delete");
+			if (!el) return null;
+			const r = el.getBoundingClientRect();
+			return { x: r.left + r.width / 2, y: r.top + r.height / 2, label: el.textContent ?? "" };
+		})()`);
+		check("浮窗的编辑态里有删除按钮", !!cardDelete, cardDelete?.label);
+		if (cardDelete) {
+			await cdp.click(cardDelete.x, cardDelete.y);
+			await sleep(900);
+			const gone = await evaluate(`(async () => {
+				const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+				const app = window.app;
+				const file = app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+				let text = "";
+				for (let i = 0; i < 16; i++) {
+					text = await app.vault.read(file);
+					if (!text.includes("浮窗里删掉")) break;
+					await sleep(250);
+				}
+				const view = app.workspace.getLeavesOfType("markdown")[0].view;
+				return {
+					onDisk: !text.includes("浮窗里删掉"),
+					inEditor: !view.editor.getValue().includes("浮窗里删掉"),
+					kept: text.includes("这段用浮窗删")
+				};
+			})()`);
+			check(
+				"浮窗里点删除也能删掉这条批注",
+				gone.onDisk && gone.inEditor,
+				`文件里没了=${gone.onDisk}、编辑器里没了=${gone.inEditor}`,
+			);
+			check("浮窗删除同样只删批注、留下原文", gone.kept);
+		}
+	} else {
+		check("浮窗里能进入编辑态", false, "没找到「编辑批注」按钮");
+	}
+} else {
+	check("临时批注的高亮找得到", false);
+}
+
+// ---------------------------------------------------------------- 7. 取消弹窗不跳走
+
+console.log("\n【7】关掉批注弹窗后不跳回顶部");
+const scrollBefore = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	editor.scrollIntoView({ from: { line: 30, ch: 0 }, to: { line: 36, ch: 0 } }, false);
+	await sleep(500);
+	// 选中第 32 行的一小段 —— 注意 setSelection 会把视图滚到光标那里，
+	// 所以「弹窗前的滚动位置」要在选完之后再取
+	const line = Math.min(32, editor.lineCount() - 1);
+	editor.setSelection({ line, ch: 0 }, { line, ch: 4 });
+	await sleep(400);
+	const before = editor.getScrollInfo().top;
+	window.app.commands.executeCommandById("lildog-annotate:add-annotation");
+	await sleep(700);
+	return {
+		before,
+		modalUp: !!document.querySelector(".lildog-modal textarea.lildog-textarea")
+	};
+})()`);
+check("滚动到中段后能打开批注弹窗", scrollBefore.modalUp, `弹窗前的滚动位置 ${Math.round(scrollBefore.before)}`);
+
+await cdp.key("Escape", { keyCode: 27 });
+await sleep(900);
+const scrollAfter = await evaluate(`(() => {
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	return {
+		modalGone: !document.querySelector(".lildog-modal"),
+		after: view.editor.getScrollInfo().top
+	};
+})()`);
+check("按 Esc 关掉弹窗", scrollAfter.modalGone);
+check(
+	"关掉弹窗后滚动位置基本没变（不会跳回笔记开头）",
+	Math.abs(scrollAfter.after - scrollBefore.before) < 30,
+	`关窗前 ${Math.round(scrollBefore.before)} → 关窗后 ${Math.round(scrollAfter.after)}`,
+);
 
 // ---------------------------------------------------------------- 还原
 

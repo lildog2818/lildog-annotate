@@ -134,3 +134,50 @@ export function createCursorGuard() {
 		},
 	);
 }
+
+/** 落在批注里的 widget 补上的类名 */
+const WIDGET_CLASS = "lildog-ann-widget";
+
+/**
+ * 让高亮连成一条：批注里嵌着公式（`$…$`）这类 **widget** 时，
+ * 它们是被「替换」出来的 DOM，CM6 的 mark 装饰盖不到 widget 本体上 ——
+ * 批注以公式开头/结尾时它还会变成高亮的**兄弟节点**，于是紫带中间缺一块、
+ * 看着断断续续（用户报的就是这个）。
+ *
+ * Obsidian 的行内公式元素是 `span.math`（不是 `.cm-widget`），所以两个都扫。
+ * 按文档位置判断它在不在某条批注的原文范围里，在的话补一个类，样式里给同样的底色。
+ */
+export function createWidgetHighlighter() {
+	const paint = (view: EditorView) => {
+		const doc = view.state.doc.toString();
+		if (!doc.includes("lildog")) return;
+		const annotations = findInlineAnnotations(doc);
+		for (const el of Array.from(
+			view.dom.querySelectorAll<HTMLElement>(".math, .cm-widget, .cm-inline-math"),
+		)) {
+			let pos: number | null = null;
+			try {
+				pos = view.posAtDOM(el);
+			} catch {
+				pos = null;
+			}
+			const inside =
+				pos !== null &&
+				annotations.some((ann) => pos! >= ann.textFrom && pos! <= ann.textTo);
+			if (inside) el.addClass(WIDGET_CLASS);
+			else el.removeClass(WIDGET_CLASS);
+		}
+	};
+
+	return ViewPlugin.fromClass(
+		class {
+			constructor(view: EditorView) {
+				window.setTimeout(() => paint(view), 0);
+			}
+			update(update: ViewUpdate) {
+				if (!update.docChanged && !update.selectionSet && !update.viewportChanged) return;
+				window.setTimeout(() => paint(update.view), 0);
+			}
+		},
+	);
+}

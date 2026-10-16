@@ -26,6 +26,8 @@ export interface HoverCardOptions {
 	fontSize: () => number;
 	/** 点保存：把新的批注内容写回去 */
 	onSave: (target: HoverTarget, body: string) => void;
+	/** 点「删除这条批注」 */
+	onDelete?: (target: HoverTarget) => void;
 }
 
 /** 鼠标从高亮移到浮窗上的间隙，小于这个时间不收起 */
@@ -168,14 +170,20 @@ export class HoverCard {
 		textarea.addEventListener("keydown", (evt) => this.onTextareaKey(evt));
 		this.textarea = textarea;
 
-		const hint = this.editWrap.createDiv({ cls: "lildog-card-hint" });
-		hint.setText("回车保存 · Shift + 回车换行 · Esc 取消");
-
 		const buttons = this.editWrap.createDiv({ cls: "lildog-card-buttons" });
+		if (this.options.onDelete) {
+			const remove = buttons.createEl("button", {
+				text: "删除",
+				cls: "lildog-card-delete mod-warning",
+			});
+			remove.addEventListener("click", () => this.remove());
+		}
 		const save = buttons.createEl("button", { text: "保存", cls: "mod-cta" });
 		save.addEventListener("click", () => this.save());
 		const cancel = buttons.createEl("button", { text: "取消" });
 		cancel.addEventListener("click", () => this.cancelEditing());
+		const hint = this.editWrap.createDiv({ cls: "lildog-card-hint" });
+		hint.setText("回车保存 · Shift + 回车换行 · Esc 取消 · 内容清空后回车 = 删除");
 
 		const actions = el.createDiv({ cls: "lildog-card-actions" });
 		const edit = actions.createEl("button", {
@@ -244,6 +252,11 @@ export class HoverCard {
 		const body = this.textarea?.value.trim() ?? "";
 		if (!target) return;
 		if (!body) {
+			// 内容清空 = 想删掉它（有删除入口时才这么理解，否则只提示）
+			if (this.options.onDelete) {
+				this.remove();
+				return;
+			}
 			this.textarea?.focus();
 			this.textarea?.addClass("lildog-card-textarea-error");
 			return;
@@ -255,6 +268,16 @@ export class HoverCard {
 		this.editing = false;
 		this.hide();
 		this.options.onSave(target, body);
+	}
+
+	/** 删掉这条批注（浮窗里的「删除」按钮，或内容清空后回车） */
+	private remove(): void {
+		const target = this.target;
+		if (!target) return;
+		this.draft = null;
+		this.editing = false;
+		this.hide();
+		this.options.onDelete?.(target);
 	}
 
 	/** 贴着高亮显示：上面放不下就放下面，左右不越出窗口 */

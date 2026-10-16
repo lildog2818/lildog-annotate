@@ -40,9 +40,14 @@ const annotations = findInlineAnnotations(doc);
 const markers = annotations.filter((a) => a.format === "marker");
 const legacy = annotations.filter((a) => a.format === "legacy");
 
-check("样例笔记：解析出的批注条数", annotations.length, 7);
-check("样例笔记：现行格式条数", markers.length, 6);
+check("样例笔记：解析出的批注条数", annotations.length, 9);
+check("样例笔记：现行格式条数", markers.length, 8);
 check("样例笔记：旧格式条数", legacy.length, 1);
+checkThat(
+	"样例笔记：夹着公式 / 行内代码的批注也解析得出来",
+	annotations.some((a) => a.text.includes("$\\omega_c$")) &&
+		annotations.some((a) => a.text.includes("`code = 1`")),
+);
 checkThat(
 	"样例笔记：每条都取到了原文和批注内容",
 	annotations.every((a) => a.text.trim().length > 0 && a.body.trim().length > 0),

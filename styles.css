@@ -21,11 +21,21 @@
 	text-decoration: none;
 }
 
-/* 高亮里嵌着行内代码、链接时，里面的子元素也要跟着变色，
-   否则会出现「一半橙一半灰」的割裂感 */
+/* 高亮里嵌着行内代码、公式、链接时，子元素要跟着变色，而且**不能再画自己的底**：
+   行内代码自带主题灰底、公式 widget 自带一层盒子，各画各的就会在紫带上
+   出现一段一段的接缝（用户说的「断断续续」）。统一摊平，由外层画一整条。 */
 .cm-content .lildog-ann *,
 .markdown-rendered .lildog-ann * {
 	color: inherit !important;
+	background: transparent !important;
+	box-shadow: none !important;
+}
+
+/* 公式/代码块这类被「替换」出来的 widget，CM6 的 mark 装饰盖不到它身上，
+   由插件后处理补这个类，让底色续上 */
+.cm-content .lildog-ann-widget {
+	background: var(--lildog-annotate-bg, rgba(126, 122, 245, 0.32)) !important;
+	border-radius: 3px;
 }
 
 /* --------------------------------------------------------------------------
@@ -232,6 +242,15 @@
 	justify-content: flex-end;
 	gap: 8px;
 	margin-top: 12px;
+}
+
+/* 删除按钮靠左，和「保存 / 取消」拉开距离，免得点错 */
+.lildog-modal-buttons .lildog-modal-delete {
+	margin-right: auto;
+}
+
+.lildog-card-buttons .lildog-card-delete {
+	margin-right: auto;
 }
 
 /* --------------------------------------------------------------------------
