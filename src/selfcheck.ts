@@ -3,6 +3,7 @@ import type { App } from "obsidian";
 import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { findInlineAnnotations, stripInlineMarkdown } from "./format";
+import { countLildogRules, hasInjectedStyles } from "./style";
 
 const REPORT_PATH = "DSH/lildog-自检报告.md";
 
@@ -80,6 +81,31 @@ export async function writeSelfCheckReport(
 		`- 外观：批注文字 ${settings.annotatedTextColor} / 底色 ${settings.highlightColor} ${Math.round(settings.highlightOpacity * 100)}% / 浮窗字号 ${settings.cardFontSize}px`,
 	);
 	lines.push("");
+	lines.push("## 样式自检");
+	lines.push(
+		`- 运行期注入的样式：${hasInjectedStyles() ? "有（插件自己注入了一份，和主题无关）" : "没有（异常）"}`,
+	);
+	lines.push(
+		`- 界面上跟 lildog 有关的 CSS 规则：${countLildogRules()} 条（插件目录里的 styles.css 有没有被 Obsidian 加载，看这个和上面那条）`,
+	);
+	const style = document.body.style;
+	lines.push(
+		`- body 上的变量：底色 ${style.getPropertyValue("--lildog-annotate-bg") || "（没设）"} / 文字 ${style.getPropertyValue("--lildog-annotate-fg") || "（没设）"} / 下划线 ${style.getPropertyValue("--lildog-annotate-line") || "（没设）"} / 浮窗字号 ${style.getPropertyValue("--lildog-card-font-size") || "（没设）"}`,
+	);
+	const firstHighlight = document.querySelector(".lildog-ann") as HTMLElement | null;
+	if (firstHighlight) {
+		const cs = getComputedStyle(firstHighlight);
+		lines.push(
+			`- 第一个高亮的计算样式：颜色 ${cs.color} / 底色 ${cs.backgroundColor} / 下划线 ${cs.boxShadow || "无"}`,
+		);
+		lines.push(
+			`- 如果「颜色」和「底色」看起来跟正文一样、下划线是 none，说明样式没生效 —— 那就是这份报告要抓的问题。`,
+		);
+	} else {
+		lines.push("- 界面上一个 .lildog-ann 都没有：要么当前笔记没有批注，要么装饰没建起来。");
+	}
+	if (diag.lastSelection) lines.push(`- 最近一次选中探测：${diag.lastSelection}`);
+	lines.push("");
 	lines.push("## 逐窗格探针");
 
 	const leaves = app.workspace.getLeavesOfType("markdown");
@@ -101,6 +127,43 @@ export async function writeSelfCheckReport(
 		lines.push(
 			`- 该窗格 .cm-line ${container.querySelectorAll(".cm-line").length} 个 / .lildog-ann ${container.querySelectorAll(".lildog-ann").length} 个 / mark ${container.querySelectorAll("mark").length} 个`,
 		);
+
+		// 光标/选区状态：折叠光标落在被藏起来的标记里，或选区压着批注时，
+		// 插件会故意把原始标记露出来（方便直接改），这时正文里会看到 lildog
+		const doc = view.editor.getValue();
+		const selections = view.editor.listSelections().map((range) => ({
+			from: view.editor.posToOffset(range.anchor),
+			to: view.editor.posToOffset(range.head),
+		}));
+		const revealed = findInlineAnnotations(doc).filter((ann) =>
+			selections.some(
+				(sel) =>
+					(sel.to > sel.from && sel.from <= ann.to && sel.to >= ann.from) ||
+					ann.hiddenRanges.some(
+						([start, end]) => sel.from > start && sel.to < end,
+					),
+			),
+		).length;
+		lines.push(
+			`- 光标/选区：${selections.map((sel) => `${sel.from}-${sel.to}`).join(" / ") || "无"}；其中会让 ${revealed} 条批注露出原始标记`,
+		);
+
+		// 阅读视图是不是根本没渲染（渲染为空时既没有高亮也没有悬停落点）
+		if (mode === "阅读视图") {
+			const preview = view.previewMode as unknown as {
+				renderer?: { text?: string; rendered?: unknown[] };
+			} | null;
+			const renderedText = preview?.renderer?.text ?? "";
+			const sizer = container.querySelector(".markdown-preview-sizer");
+			lines.push(
+				`- 阅读视图渲染状态：渲染器里的文本 ${renderedText.length} 字 / 预览容器子节点 ${sizer?.children.length ?? 0} 个 / 界面上可见文字 ${(container.querySelector(".markdown-reading-view")?.textContent ?? "").length} 字`,
+			);
+			if ((container.querySelector(".markdown-reading-view")?.textContent ?? "").length === 0) {
+				lines.push(
+					"- 阅读视图现在是空的：正文都没渲染出来，高亮和悬停自然也没有。切一下编辑/阅读模式，或者重开这篇笔记看看。",
+				);
+			}
+		}
 
 		const first = annotations[0];
 		if (!first) {

@@ -35,8 +35,15 @@ async function shoot(name) {
 
 await evaluate(`(async () => {
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-	for (let i = 0; i < 80 && !window.app?.workspace?.layoutReady; i++) await sleep(250);
-	return !!window.app;
+	const app = window.app;
+	for (let i = 0; i < 80 && !app?.workspace?.layoutReady; i++) await sleep(250);
+	// 只留一个窗格：后台标签页的内容是空的，拿它做检查会得出假结论
+	const leaves = app.workspace.getLeavesOfType("markdown");
+	for (const leaf of leaves) {
+		if (leaf !== app.workspace.activeLeaf) leaf.detach();
+	}
+	await sleep(500);
+	return !!app;
 })()`);
 
 const original = await evaluate(`(async () => {
@@ -102,6 +109,60 @@ check("带一条同色下划线（提高辨识度）", /inset/.test(marker?.shad
 	process.exit(1);
 }
 await shoot("01-编辑器高亮");
+
+// 万一 Obsidian 那份 styles.css 没生效（或不是最新的），高亮也必须看得见：
+// 插件加载时会自己注入一份样式，这里就把其它样式摘掉验一次
+console.log("\n【1b】样式表不生效时也看得见");
+const styleFallback = await evaluate(`(() => {
+	const pick = () => document.querySelector(".cm-content .lildog-ann");
+	const read = () => {
+		const el = pick();
+		const cs = el ? getComputedStyle(el) : null;
+		return { color: cs?.color, background: cs?.backgroundColor };
+	};
+	const injected = document.getElementById("lildog-annotate-runtime-style");
+	const injectedText = injected?.textContent ?? "";
+	const others = Array.from(document.querySelectorAll("style")).filter(
+		(el) => el !== injected && (el.textContent ?? "").includes(".lildog-ann"),
+	);
+	others.forEach((el) => el.remove());
+	const withInjected = read();
+	injected?.remove();
+	const withoutAnything = read();
+	const restored = document.createElement("style");
+	restored.id = "lildog-annotate-runtime-style";
+	restored.textContent = injectedText;
+	document.head.appendChild(restored);
+	const afterRestore = read();
+	return {
+		hasInjected: !!injected && injectedText.includes(".lildog-ann"),
+		removedOthers: others.length,
+		withInjected,
+		withoutAnything,
+		afterRestore
+	};
+})()`);
+check(
+	"插件自己注入了一份样式（不再完全依赖 Obsidian 加载 styles.css）",
+	styleFallback.hasInjected,
+	`顺手摘掉了 ${styleFallback.removedOthers} 份其它样式`,
+);
+check(
+	"只剩插件注入的样式时，高亮照样有色",
+	styleFallback.withInjected.color === "rgb(217, 130, 43)" &&
+		styleFallback.withInjected.background === "rgba(126, 122, 245, 0.32)",
+	`color=${styleFallback.withInjected.color} bg=${styleFallback.withInjected.background}`,
+);
+check(
+	"样式全摘掉时高亮确实会失色（说明上一条不是假阳性）",
+	styleFallback.withoutAnything.color !== "rgb(217, 130, 43)",
+	`color=${styleFallback.withoutAnything.color}`,
+);
+check(
+	"样式恢复后高亮又回来了",
+	styleFallback.afterRestore.color === "rgb(217, 130, 43)",
+	styleFallback.afterRestore.color,
+);
 
 // ---------------------------------------------------------------- 2. 悬停浮窗
 
@@ -381,6 +442,28 @@ if (!occurrence.error) {
 		check("批注写进了笔记", landed.found);
 		check("批注落在选中的第三处（前面正好两处相同文字）", landed.before === 2, `前面 ${landed.before} 处`);
 		check("被批注的文字就是那一段", landed.covered);
+
+		// 阅读视图里批注完，这一段必须当场补上高亮（不重画的话就是「批注了却看不见」）
+		const refreshed = await evaluate(`(async () => {
+			const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+			const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+			if (view.getMode() !== "preview") return { skipped: true };
+			view.previewMode.applyScroll?.(0);
+			const preview = view.containerEl.querySelector(".markdown-preview-view");
+			if (preview) preview.scrollTop = 0;
+			await sleep(900);
+			const marks = Array.from(view.containerEl.querySelectorAll(".markdown-reading-view .lildog-ann"));
+			return {
+				skipped: false,
+				total: marks.length,
+				hit: marks.some((el) => (el.dataset.lildogFrom ?? "").length > 0 && (el.textContent ?? "").includes("梯度消失"))
+			};
+		})()`);
+		check(
+			"阅读视图里批注完当场就有高亮（不用切模式或重开笔记）",
+			refreshed.skipped || refreshed.hit,
+			refreshed.skipped ? "当前不在阅读视图" : `高亮 ${refreshed.total} 个`,
+		);
 	}
 }
 

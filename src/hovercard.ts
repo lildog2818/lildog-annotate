@@ -148,6 +148,9 @@ export class HoverCard {
 		if (this.el) return;
 
 		const el = document.body.createDiv({ cls: "lildog-card" });
+		// 定位相关的两条直接写在元素上：万一样式表没生效，浮窗也不至于被塞到页面最底下
+		el.style.position = "fixed";
+		el.style.zIndex = "var(--layer-popover, 30)";
 		// 鼠标在浮窗上时不能收起来，否则没法点「编辑」、也没法选中文字
 		el.addEventListener("mouseenter", () => this.cancelHide());
 		el.addEventListener("mouseleave", () => this.scheduleHide());

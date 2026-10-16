@@ -19,6 +19,10 @@ const context = await esbuild.context({
 	},
 	entryPoints: ["src/main.ts"],
 	bundle: true,
+	// styles.css 也打进 main.js：插件加载时自己注入一份，不依赖 Obsidian 有没有加载它
+	loader: {
+		".css": "text",
+	},
 	external: [
 		"obsidian",
 		"electron",

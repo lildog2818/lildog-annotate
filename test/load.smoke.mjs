@@ -39,6 +39,7 @@ const styleVars = new Map();
 const bodyStyle = {
 	setProperty: (name, value) => styleVars.set(name, String(value)),
 	removeProperty: (name) => styleVars.delete(name),
+	getPropertyValue: (name) => styleVars.get(name) ?? "",
 };
 
 class PluginStub {
@@ -127,13 +128,41 @@ const cmStateStub = {
 // ---------------------------------------------------------------- 加载
 
 // Obsidian 跑在浏览器环境里，Node 里得自己补上这些全局对象
+/** 插件加载时会往 head 里注入一份样式，这里用一个极小的登记表模拟 */
+const styleEls = new Map();
 globalThis.document = {
 	addEventListener() {},
 	removeEventListener() {},
-	createElement: () => ({}),
+	createElement: (tag) => {
+		if (tag !== "style") return {};
+		const el = {
+			id: "",
+			textContent: "",
+			remove() {
+				styleEls.delete(el.id);
+			},
+		};
+		return el;
+	},
+	getElementById: (id) => styleEls.get(id) ?? null,
+	querySelector: () => null,
 	querySelectorAll: () => [],
-	body: { createDiv: () => ({}), createEl: () => ({}), style: bodyStyle },
+	styleSheets: [],
+	head: {
+		appendChild: (el) => {
+			if (el?.id) styleEls.set(el.id, el);
+		},
+	},
+	body: { createDiv: () => ({}), createEl: () => ({}), style: bodyStyle, appendChild() {} },
 };
+globalThis.getComputedStyle = () => ({
+	color: "",
+	backgroundColor: "",
+	boxShadow: "",
+	fontSize: "",
+	display: "",
+	position: "",
+});
 globalThis.window = {
 	addEventListener() {},
 	removeEventListener() {},
@@ -247,6 +276,15 @@ check(
 	styleVars.has("--lildog-annotate-line"),
 );
 {
+	// 样式表内容由构建时打进 main.js 再注入：不依赖 Obsidian 有没有加载 styles.css
+	const injected = styleEls.get("lildog-annotate-runtime-style");
+	const css = injected?.textContent ?? "";
+	check("插件自己注入了样式（不再只看 Obsidian 那份）", css.length > 0);
+	check("注入的样式里有批注高亮规则", css.includes(".lildog-ann"));
+	check("注入的样式里有浮窗定位规则", css.includes(".lildog-card") && css.includes("position: fixed"));
+	check("注入的样式用上了外观变量", css.includes("--lildog-annotate-fg"));
+}
+{
 	// 手改 data.json 里的非法值不该把插件带崩
 	plugin.settings.annotatedTextColor = "不是颜色";
 	plugin.settings.cardFontSize = 999;
@@ -278,6 +316,11 @@ check(
 	report.includes(".lildog-ann（批注高亮）元素"),
 );
 check("报告记录了最近一次选中探测", report.includes("最近一次选中文字探测"));
+check("报告有样式自检一节", report.includes("## 样式自检"));
+check(
+	"报告能说明样式有没有生效",
+	report.includes("运行期注入的样式：有") && report.includes("界面上跟 lildog 有关的 CSS 规则"),
+);
 check("报告记录了悬停浮窗的统计", report.includes("悬停浮窗：弹出"));
 check("报告记录了最近一次悬停", report.includes("最近一次悬停"));
 check("报告记录了外观设置", report.includes("外观：批注文字"));

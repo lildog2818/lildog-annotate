@@ -27,6 +27,7 @@ import type { HoverTarget } from "./hovercard";
 import { writeSelfCheckReport } from "./selfcheck";
 import { DEFAULT_SETTINGS, LildogSettingTab, sanitizeSettings } from "./settings";
 import type { AnnotationMode, LildogSettings } from "./settings";
+import { injectStyles, removeStyles } from "./style";
 
 /** 光标位置处找到的一条批注 */
 interface FoundAnnotation {
@@ -89,6 +90,8 @@ export default class LildogAnnotatePlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		// 样式自己注入一份：不依赖 Obsidian 有没有（或者是不是最新的）加载 styles.css
+		injectStyles();
 		this.addSettingTab(new LildogSettingTab(this.app, this));
 		this.applyAppearance();
 
@@ -219,6 +222,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 
 	onunload(): void {
 		this.clearAppearance();
+		removeStyles();
 	}
 
 	// ---------------------------------------------------------------- 外观
@@ -609,10 +613,33 @@ export default class LildogAnnotatePlugin extends Plugin {
 		const view = range.view;
 		if (!view) return;
 		if (view.getMode() === "preview" && view.file) {
-			void this.app.vault.modify(view.file, editor.getValue());
+			void this.app.vault
+				.modify(view.file, editor.getValue())
+				.then(() => this.refreshReadingView(view));
 			return;
 		}
 		view.requestSave?.();
+	}
+
+	/**
+	 * 阅读视图里改写文件后，让它按新内容重画一遍。
+	 *
+	 * 批注高亮是渲染时由插件加上去的：不重画，这一段就一直是旧样子 ——
+	 * 表现正是「批注明明写进去了，却看不到高亮、也悬停不出浮窗」。
+	 */
+	private refreshReadingView(view: MarkdownView): void {
+		const preview = view.previewMode as unknown as {
+			rerender?: (full?: boolean) => void;
+			renderer?: { rerender?: () => void };
+		} | null;
+		try {
+			if (typeof preview?.rerender === "function") preview.rerender(true);
+			else if (typeof preview?.renderer?.rerender === "function") {
+				preview.renderer.rerender();
+			}
+		} catch {
+			// 内部接口：拿不到就算了，下次重画时高亮照样会出现
+		}
 	}
 
 	// ---------------------------------------------------------------- 查找
