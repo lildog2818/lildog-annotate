@@ -2,8 +2,9 @@ import { MarkdownView, TFile, normalizePath } from "obsidian";
 import type { App } from "obsidian";
 import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
-import { findInlineAnnotations, stripInlineMarkdown } from "./format";
+import { explainReveal, findInlineAnnotations } from "./format";
 import { countLildogRules, hasInjectedStyles } from "./style";
+import { resolveHighlight } from "./resolve";
 
 const REPORT_PATH = "DSH/lildog-自检报告.md";
 
@@ -73,8 +74,9 @@ export async function writeSelfCheckReport(
 		`- 整个界面里 .lildog-ann（批注高亮）元素：${document.querySelectorAll(".lildog-ann").length} 个`,
 	);
 	lines.push(
-		`- 悬停浮窗：弹出 ${diag.hoverShows} 次 / 在浮窗里改完 ${diag.hoverEdits} 次`,
+		`- 悬停浮窗：弹出 ${diag.hoverShows} 次 / 认不出来 ${diag.hoverMisses} 次 / 在浮窗里改完 ${diag.hoverEdits} 次`,
 	);
+	lines.push(`- 最近一次悬停解析：${diag.lastHoverResolve}`);
 	lines.push(`- 最近一次悬停：${diag.lastHover}`);
 	lines.push(`- 最近一次选中文字探测：${diag.lastSelection}`);
 	lines.push(
@@ -119,98 +121,149 @@ export async function writeSelfCheckReport(
 
 		const mode = view.getMode() === "preview" ? "阅读视图" : "编辑视图";
 		const container = view.containerEl;
-		const annotations = findInlineAnnotations(view.editor.getValue());
+		const doc = view.editor.getValue();
+		const annotations = findInlineAnnotations(doc);
+		const highlights = Array.from(
+			container.querySelectorAll(".lildog-ann"),
+		) as HTMLElement[];
+		const selections = view.editor
+			.listSelections()
+			.map(
+				(range) =>
+					[
+						view.editor.posToOffset(range.anchor),
+						view.editor.posToOffset(range.head),
+					] as const,
+			);
 
 		lines.push("");
 		lines.push(`### 窗格 ${index + 1}：${mode} — ${view.file?.path ?? "未知"}`);
-		lines.push(`- 文件里共 ${annotations.length} 条行内批注`);
 		lines.push(
-			`- 该窗格 .cm-line ${container.querySelectorAll(".cm-line").length} 个 / .lildog-ann ${container.querySelectorAll(".lildog-ann").length} 个 / mark ${container.querySelectorAll("mark").length} 个`,
+			`- 文件里共 ${annotations.length} 条行内批注；这个窗格里有 ${highlights.length} 个高亮元素`,
 		);
-
-		// 光标/选区状态：折叠光标落在被藏起来的标记里，或选区压着批注时，
-		// 插件会故意把原始标记露出来（方便直接改），这时正文里会看到 lildog
-		const doc = view.editor.getValue();
-		const selections = view.editor.listSelections().map((range) => ({
-			from: view.editor.posToOffset(range.anchor),
-			to: view.editor.posToOffset(range.head),
-		}));
-		const revealed = findInlineAnnotations(doc).filter((ann) =>
-			selections.some(
-				(sel) =>
-					(sel.to > sel.from && sel.from <= ann.to && sel.to >= ann.from) ||
-					ann.hiddenRanges.some(
-						([start, end]) => sel.from > start && sel.to < end,
-					),
-			),
-		).length;
 		lines.push(
-			`- 光标/选区：${selections.map((sel) => `${sel.from}-${sel.to}`).join(" / ") || "无"}；其中会让 ${revealed} 条批注露出原始标记`,
+			`- 该窗格 .cm-line ${container.querySelectorAll(".cm-line").length} 个 / mark ${container.querySelectorAll("mark").length} 个`,
+		);
+		lines.push(
+			`- 光标/选区：${selections.map((sel) => `${sel[0]}-${sel[1]}`).join(" / ") || "无"}`,
 		);
 
 		// 阅读视图是不是根本没渲染（渲染为空时既没有高亮也没有悬停落点）
 		if (mode === "阅读视图") {
 			const preview = view.previewMode as unknown as {
-				renderer?: { text?: string; rendered?: unknown[] };
+				renderer?: { text?: string };
 			} | null;
 			const renderedText = preview?.renderer?.text ?? "";
 			const sizer = container.querySelector(".markdown-preview-sizer");
+			const visible = (container.querySelector(".markdown-reading-view")?.textContent ?? "")
+				.length;
 			lines.push(
-				`- 阅读视图渲染状态：渲染器里的文本 ${renderedText.length} 字 / 预览容器子节点 ${sizer?.children.length ?? 0} 个 / 界面上可见文字 ${(container.querySelector(".markdown-reading-view")?.textContent ?? "").length} 字`,
+				`- 阅读视图渲染状态：渲染器里的文本 ${renderedText.length} 字 / 预览容器子节点 ${sizer?.children.length ?? 0} 个 / 界面上可见文字 ${visible} 字`,
 			);
-			if ((container.querySelector(".markdown-reading-view")?.textContent ?? "").length === 0) {
+			if (visible === 0) {
 				lines.push(
 					"- 阅读视图现在是空的：正文都没渲染出来，高亮和悬停自然也没有。切一下编辑/阅读模式，或者重开这篇笔记看看。",
 				);
 			}
 		}
 
-		const first = annotations[0];
-		if (!first) {
-			lines.push("- 该文件没有行内批注，跳过 DOM 探针。");
-			return;
-		}
-
-		lines.push(`- 第 1 条：原文「${first.text}」 / 批注「${first.body}」`);
-
-		// 编辑态：看标记有没有被藏住
+		// 编辑器 DOM 里有没有把原始标记露出来（露出来时正文里会出现 lildog 字样）
 		const cmLines = Array.from(
 			container.querySelectorAll(".cm-line"),
 		) as HTMLElement[];
-		// 实时预览会吃掉行内代码的反引号，所以两种形式都拿来找
-		const candidates = [first.text, stripInlineMarkdown(first.text)].filter(
-			(candidate) => candidate.trim().length > 0,
+		const leaked = cmLines.filter((line) =>
+			(line.textContent ?? "").includes("lildog"),
 		);
-		const hit = cmLines.find((line) =>
-			candidates.some((candidate) => (line.textContent ?? "").includes(candidate)),
+		lines.push(
+			`- 编辑器 DOM 里露出 lildog 字样的行：${leaked.length} 行${leaked.length ? "（下面逐条说明是谁弄露的）" : ""}`,
 		);
-		if (hit) {
-			lines.push(
-				"- 编辑 DOM：该行 textContent（出现 lildog 或 `<!--` 就是没藏住）：",
-			);
-			lines.push(fence(clip(hit.textContent ?? "", 600)));
-			lines.push("- 编辑 DOM：该行 innerHTML：");
-			lines.push(fence(clip(hit.innerHTML, 900)));
+
+		if (!annotations.length) {
+			lines.push("- 该文件没有行内批注，跳过逐条探针。");
+			return;
 		}
 
-		// 阅读态：看配对有没有成功
-		const marks = Array.from(
-			container.querySelectorAll("mark"),
-		) as HTMLElement[];
-		const annotated = container.querySelector(
-			"mark.lildog-ann",
-		) as HTMLElement | null;
-		if (annotated) {
-			lines.push("- 阅读 DOM：已配对的高亮 outerHTML：");
-			lines.push(fence(clip(annotated.outerHTML, 400)));
-		} else if (marks[0]) {
-			lines.push("- 阅读 DOM：没有配对上。第一个 mark 的 outerHTML：");
-			lines.push(fence(clip(marks[0].outerHTML, 400)));
+		// 逐条：露出判定 + 高亮几何 + 悬停解析，一次把「为什么看不见 / 弹不出来」说清
+		annotations.forEach((ann, order) => {
+			lines.push("");
 			lines.push(
-				`- 该高亮所在容器的子节点：${describeNodes(marks[0].parentElement)}`,
+				`#### 第 ${order + 1} 条：原文「${clip(ann.text, 40)}」 / 批注「${clip(ann.body, 40)}」`,
 			);
-		} else if (mode === "阅读视图") {
-			lines.push("- 阅读 DOM：这个窗格里一个 <mark> 都没有。");
+			lines.push(
+				`- 源码区间 ${ann.from}-${ann.to}（原文 ${ann.textFrom}-${ann.textTo}，格式 ${ann.format}）`,
+			);
+			const reveal = explainReveal(ann, selections);
+			lines.push(
+				`- 原始标记：${reveal.revealed ? `露出 —— ${reveal.why}` : "已藏住"}`,
+			);
+
+			const mine = highlights.filter(
+				(el) => resolveHighlight(el, doc, annotations).annotation === ann,
+			);
+			if (!mine.length) {
+				lines.push(
+					"- 界面上没有对应的高亮：装饰没建起来（看上面的装饰报错），或者这一段当前没渲染。",
+				);
+				return;
+			}
+			mine.forEach((el, sub) => {
+				const resolved = resolveHighlight(el, doc, annotations);
+				const box = el.getBoundingClientRect();
+				const rects = Array.from(el.getClientRects()).filter(
+					(rect) => rect.width > 0 && rect.height > 0,
+				);
+				if (rects.length === 0) {
+					// 另一个视图模式留在 DOM 里的残影（阅读视图的 <mark> 在编辑模式下就是 0×0），不算问题
+					lines.push(
+						`- 高亮 #${sub + 1}：<${el.tagName.toLowerCase()}>「${clip(el.textContent ?? "", 20)}」当前不可见（0×0），多半是另一个视图模式的残留 DOM，跳过几何检查。`,
+					);
+					return;
+				}
+				const rect = rects[0]!;
+				const cx = Math.round(rect.left + rect.width / 2);
+				const cy = Math.round(rect.top + rect.height / 2);
+				const stack = document.elementsFromPoint(cx, cy);
+				// 插件自己的浮窗/按钮可能正压在上面，做几何判定时要跳过它们
+				const hit =
+					stack.find(
+						(node) =>
+							!node.classList?.contains("lildog-card") &&
+							!node.classList?.contains("lildog-float-btn"),
+					) ?? null;
+				const hitIsHighlight = stack.some((node) => node === el || el.contains(node));
+				lines.push(
+					`- 高亮 #${sub + 1}：<${el.tagName.toLowerCase()}> 文字「${clip(el.textContent ?? "", 24)}」，` +
+						`几何 ${Math.round(box.width)}x${Math.round(box.height)}，client rect ${rects.length} 段` +
+						`${rects.length > 1 ? "（文字折行了：一个高亮横跨两行，鼠标要停在文字上才落得到它）" : ""}`,
+				);
+				lines.push(
+					`  - 文字中心命中的元素：${
+						hit ? `${hit.tagName.toLowerCase()}（${hitIsHighlight ? "命中链里有这个高亮，鼠标停得上来" : "命中链里没有这个高亮 —— 鼠标停在这段文字上时落不到它，悬停浮窗就不会弹"}）` : "无"
+					}`,
+				);
+				lines.push(`  - 悬停能不能认出这条批注：${resolved.reason}`);
+			});
+		});
+
+		// 阅读态：看配对有没有成功（老问题：按文字找 DOM 可能找不到）
+		if (mode === "阅读视图") {
+			const annotated = container.querySelector(
+				"mark.lildog-ann",
+			) as HTMLElement | null;
+			const marks = Array.from(container.querySelectorAll("mark")) as HTMLElement[];
+			if (annotated) {
+				lines.push("");
+				lines.push("- 阅读 DOM：已配对的高亮 outerHTML：");
+				lines.push(fence(clip(annotated.outerHTML, 400)));
+			} else if (marks[0]) {
+				lines.push("");
+				lines.push("- 阅读 DOM：没有配对上。第一个 mark 的 outerHTML：");
+				lines.push(fence(clip(marks[0].outerHTML, 400)));
+				lines.push(`- 该高亮所在容器的子节点：${describeNodes(marks[0].parentElement)}`);
+			} else {
+				lines.push("");
+				lines.push("- 阅读 DOM：这个窗格里一个 <mark> 都没有。");
+			}
 		}
 	});
 

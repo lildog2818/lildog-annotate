@@ -1,6 +1,7 @@
 import {
 	blockInsertLine,
 	canUseInline,
+	explainReveal,
 	extendToBalanceBackticks,
 	findBlockAtLine,
 	findInlineAnnotations,
@@ -310,6 +311,37 @@ const planAnn = findInlineAnnotations(planDoc)[0]!;
 		[planDoc.length, planDoc.length],
 	]);
 	check("装饰规划：刚写完批注、光标在批注末尾时，标记仍然藏着", cursorAtEnd.entries.length, 3);
+
+	// 回归：选区只是「碰到」批注（边界正好落在起点/终点上）时不能露出，
+	// 否则随手选一段文字就会看到一堆 <!--lildog: …-->
+	check(
+		"装饰规划：选区只是碰到批注起点，标记照样藏着",
+		planEditorDecorations(planDoc, [[0, planAnn.from]]).entries.length,
+		3,
+	);
+	check(
+		"装饰规划：选区从批注终点开始，标记照样藏着",
+		planEditorDecorations(planDoc, [[planAnn.to, planDoc.length]]).entries.length,
+		3,
+	);
+
+	// explainReveal：自检报告直接念这句话，必须说清「是谁把标记弄露的」
+	check("露出判定：没有选区压着 → 不露", explainReveal(planAnn, []).revealed, false);
+	check(
+		"露出判定：选中原文 → 露出，并说明是哪个选区",
+		explainReveal(planAnn, [[planAnn.textFrom, planAnn.textTo]]).why,
+		`选区 ${planAnn.textFrom}-${planAnn.textTo} 选中了原文`,
+	);
+	check(
+		"露出判定：光标落在被藏起来的标记里 → 露出，并说明位置",
+		explainReveal(planAnn, [[planAnn.from + 2, planAnn.from + 2]]).why,
+		`光标 ${planAnn.from + 2} 落在被藏起来的标记 ${planAnn.from}-${planAnn.textFrom} 里面`,
+	);
+	check(
+		"露出判定：选区只是碰到边界 → 不露",
+		explainReveal(planAnn, [[0, planAnn.from]]).revealed,
+		false,
+	);
 }
 
 {

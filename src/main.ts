@@ -1,6 +1,5 @@
 import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
 import type { EditorPosition } from "obsidian";
-import { EditorView } from "@codemirror/view";
 import { hexToRgba } from "./colors";
 import {
 	blockInsertLine,
@@ -21,9 +20,11 @@ import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
+import { createAtomicRanges } from "./decorations";
 import { createEditorDecorations, decorateReadingView } from "./hover";
 import { HoverCard } from "./hovercard";
 import type { HoverTarget } from "./hovercard";
+import { rectUnderPointer, resolveHighlight } from "./resolve";
 import { writeSelfCheckReport } from "./selfcheck";
 import { DEFAULT_SETTINGS, LildogSettingTab, sanitizeSettings } from "./settings";
 import type { AnnotationMode, LildogSettings } from "./settings";
@@ -95,8 +96,9 @@ export default class LildogAnnotatePlugin extends Plugin {
 		this.addSettingTab(new LildogSettingTab(this.app, this));
 		this.applyAppearance();
 
-		// 批注记号（编辑器）：标记藏起来 + 被批注的文字上色
-		this.registerEditorExtension([createEditorDecorations()]);
+		// 批注记号（编辑器）：标记藏起来 + 被批注的文字上色。
+		// 原子区间让光标进不到藏起来的标记里（否则一点就整条露出来）
+		this.registerEditorExtension([createEditorDecorations(), createAtomicRanges()]);
 		// 阅读视图：给每个段落打上行号范围（阅读视图里按文字反查源码要用），
 		// 并把批注对应的文字找出来上色、记下源码偏移
 		this.registerMarkdownPostProcessor(async (el, ctx) => {
@@ -277,14 +279,15 @@ export default class LildogAnnotatePlugin extends Plugin {
 		const el = node.closest(".lildog-ann") as HTMLElement | null;
 		if (!el) return;
 
-		const target = this.resolveHoverTarget(el);
+		const target = this.resolveHoverTarget(el, evt);
 		if (!target) {
-			diag.lastHover = `悬停到 .lildog-ann 但没在源码里认出批注（${el.tagName.toLowerCase()}）`;
+			diag.hoverMisses++;
 			return;
 		}
 		diag.hoverShows++;
 		diag.lastHover = `${target.view.getMode() === "preview" ? "阅读视图" : "编辑器"} · 原文「${target.text.slice(0, 20)}」 · 批注「${target.body.slice(0, 20)}」`;
-		card.show(target, el.getBoundingClientRect());
+		// 用鼠标底下那一块的矩形定位：高亮折行时 getBoundingClientRect 会是一个跨行大盒子
+		card.show(target, rectUnderPointer(el, evt.clientX, evt.clientY));
 	}
 
 	private handleHoverEnd(evt: MouseEvent): void {
@@ -300,45 +303,26 @@ export default class LildogAnnotatePlugin extends Plugin {
 	/**
 	 * 从悬停到的高亮元素倒推出是哪一条批注。
 	 *
-	 * 编辑器里能通过 CodeMirror 把 DOM 位置换算成文档偏移，精确；
-	 * 阅读视图里没有这个通道，就用装饰时记在 dataset 上的源码偏移。
+	 * 解析过程交给 resolveHighlight（它会把「为什么没解析出来」记进 diag，
+	 * 自检报告里能直接看到）。
 	 */
-	private resolveHoverTarget(el: HTMLElement): HoverTarget | null {
-		const cmEl = el.closest(".cm-editor") as HTMLElement | null;
-		if (cmEl) {
-			const cmView = EditorView.findFromDOM(cmEl);
-			const view = this.markdownViewFor(el);
-			if (!cmView || !view) return null;
-			const doc = cmView.state.doc.toString();
-			const annotations = findInlineAnnotations(doc);
-			let pos: number | null = null;
-			try {
-				pos = cmView.posAtDOM(el);
-			} catch {
-				pos = null;
-			}
-			let ann =
-				pos === null
-					? undefined
-					: annotations.find((item) => pos! >= item.from && pos! <= item.to);
-			if (!ann) {
-				// 块级 widget（表格等）换算不出偏移时，退回按文字配对
-				const text = (el.textContent ?? "").trim();
-				ann = annotations.find((item) => item.text.trim() === text);
-			}
-			if (!ann) return null;
-			return { view, from: ann.from, to: ann.to, text: ann.text, body: ann.body };
-		}
-
-		const from = Number(el.dataset.lildogFrom);
-		const to = Number(el.dataset.lildogTo);
+	private resolveHoverTarget(
+		el: HTMLElement,
+		evt?: MouseEvent,
+	): HoverTarget | null {
 		const view = this.markdownViewFor(el);
-		if (!view || !Number.isFinite(from) || !Number.isFinite(to)) return null;
-		const annotations = findInlineAnnotations(view.editor.getValue());
-		const ann =
-			annotations.find((item) => item.from === from && item.to === to) ??
-			annotations.find((item) => from >= item.from && from < item.to);
-		if (!ann) return null;
+		if (!view) {
+			diag.lastHover = `悬停到高亮，但没找到它属于哪个 Markdown 窗格（${describeTarget(el)}）`;
+			return null;
+		}
+		const doc = view.editor.getValue();
+		const resolved = resolveHighlight(el, doc);
+		diag.lastHoverResolve = resolved.reason;
+		if (!resolved.annotation) {
+			diag.lastHover = `悬停到高亮但认不出是哪条批注：${resolved.reason}`;
+			return null;
+		}
+		const ann = resolved.annotation;
 		return { view, from: ann.from, to: ann.to, text: ann.text, body: ann.body };
 	}
 

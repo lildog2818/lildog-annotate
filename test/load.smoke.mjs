@@ -94,12 +94,24 @@ const obsidianStub = {
 	setTooltip() {},
 };
 
+/** 自检报告要逐条念出「高亮在哪、悬停认不认得出」，这里给它一份可用的样例 */
+const SAMPLE_DOC = "前<!--lildog: 为什么？-->正文<!--/lildog-->后";
+const SAMPLE_TEXT_AT = SAMPLE_DOC.indexOf("正文");
+
 const cmViewStub = {
 	hoverTooltip: (source, options) => ({ kind: "hoverTooltip", source, options }),
 	EditorView: {
 		decorations: {
 			compute: (deps, get) => ({ kind: "EditorView.decorations", deps, get }),
 		},
+		atomicRanges: {
+			of: (get) => ({ kind: "EditorView.atomicRanges", get }),
+		},
+		// 自检会用它把 DOM 位置换算成文档偏移
+		findFromDOM: () => ({
+			state: { doc: { toString: () => SAMPLE_DOC } },
+			posAtDOM: () => SAMPLE_TEXT_AT,
+		}),
 	},
 	ViewPlugin: {
 		fromClass: (cls, spec) => ({ kind: "ViewPlugin", cls, spec }),
@@ -117,6 +129,9 @@ const cmViewStub = {
 };
 
 const cmStateStub = {
+	RangeSet: {
+		of: (ranges) => ({ kind: "RangeSet", ranges }),
+	},
 	RangeSetBuilder: class {
 		add() {}
 		finish() {
@@ -147,6 +162,8 @@ globalThis.document = {
 	getElementById: (id) => styleEls.get(id) ?? null,
 	querySelector: () => null,
 	querySelectorAll: () => [],
+	elementFromPoint: () => null,
+	elementsFromPoint: () => [],
 	styleSheets: [],
 	head: {
 		appendChild: (el) => {
@@ -191,11 +208,45 @@ try {
 
 check("导出的是插件类", typeof PluginClass === "function");
 
+// 一个最小的窗格：里面有一条批注、一个高亮元素，够自检把逐条探针跑完
+function fakeRect(left = 0, top = 0, width = 10, height = 10) {
+	return {
+		left,
+		top,
+		width,
+		height,
+		right: left + width,
+		bottom: top + height,
+	};
+}
+const highlightEl = {
+	tagName: "SPAN",
+	className: "lildog-ann",
+	dataset: {},
+	textContent: "正文",
+	closest: (selector) => (selector === ".cm-editor" ? { fake: true } : null),
+	getBoundingClientRect: () => fakeRect(0, 0, 20, 20),
+	getClientRects: () => [fakeRect(0, 0, 20, 20)],
+	contains: () => false,
+};
+const fakeView = new obsidianStub.MarkdownView();
+fakeView.containerEl = {
+	querySelectorAll: (selector) => (selector === ".lildog-ann" ? [highlightEl] : []),
+	querySelector: () => null,
+};
+fakeView.getMode = () => "source";
+fakeView.file = { path: "测试.md" };
+fakeView.editor = {
+	getValue: () => SAMPLE_DOC,
+	listSelections: () => [{ anchor: { line: 0, ch: 0 }, head: { line: 0, ch: 0 } }],
+	posToOffset: () => 0,
+};
+
 const app = {
 	workspace: {
 		on: () => ({ unsubscribe: () => {} }),
 		getActiveViewOfType: () => null,
-		getLeavesOfType: () => [],
+		getLeavesOfType: (type) => (type === "markdown" ? [{ view: fakeView }] : []),
 	},
 	vault: {
 		__files: new Map(),
@@ -256,6 +307,10 @@ check(
 	commands.every((c) => typeof c.name === "string" && c.name.length > 0),
 );
 check("注册了编辑器扩展（装饰 / 隐藏标记）", editorExtensions.length === 1);
+check(
+	"编辑器扩展里含原子区间（点标记不会把光标塞进去）",
+	editorExtensions[0]?.some?.((ext) => ext?.kind === "EditorView.atomicRanges"),
+);
 check("注册了阅读视图后处理器", postProcessors.length === 1);
 check("注册了设置页", settingTabs.length === 1);
 check(
@@ -323,6 +378,12 @@ check(
 );
 check("报告记录了悬停浮窗的统计", report.includes("悬停浮窗：弹出"));
 check("报告记录了最近一次悬停", report.includes("最近一次悬停"));
+check(
+	"报告逐条说明标记为什么露出 / 为什么弹不出浮窗",
+	report.includes("原始标记：") &&
+		report.includes("悬停能不能认出这条批注：") &&
+		report.includes("client rect"),
+);
 check("报告记录了外观设置", report.includes("外观：批注文字"));
 check("报告记录了插件版本", report.includes("插件版本："));
 check("报告会提示 getSectionInfo 状态", report.includes("getSectionInfo"));

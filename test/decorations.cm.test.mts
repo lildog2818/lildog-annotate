@@ -10,7 +10,7 @@
  */
 import { EditorSelection, EditorState } from "@codemirror/state";
 import type { Decoration } from "@codemirror/view";
-import { buildEditorDecorations } from "../src/decorations.ts";
+import { buildAtomicRanges, buildEditorDecorations } from "../src/decorations.ts";
 import { diag, resetDiagnostics } from "../src/diagnostics.ts";
 import { findInlineAnnotations } from "../src/format.ts";
 
@@ -144,6 +144,43 @@ const markerDoc = "前<!--lildog: 为什么？-->正文<!--/lildog-->后";
 	);
 	check("空文档不崩", inspect("").ranges.length, 0);
 	check("没有批注的文档不产生装饰", inspect("很普通的一段话。").ranges.length, 0);
+}
+
+// ------------------------------------------- 原子区间：光标不能停在藏起来的标记里
+// 不登记原子区间时，鼠标点在标记那一段（视觉上是空的）上会把光标塞进标记内部，
+// 插件看到「光标停在标记里」就把整条批注的原始标记露出来 ——
+// 表现就是正文里突然冒出一堆 <!--lildog: …-->
+{
+	const set = buildAtomicRanges(EditorState.create({ doc: markerDoc }));
+	const ranges: string[] = [];
+	set.between(0, markerDoc.length, (from, to) => {
+		ranges.push(markerDoc.slice(from, to));
+	});
+	check("原子区间：两段藏起来的标记都在里头", ranges, [
+		"<!--lildog: 为什么？-->",
+		"<!--/lildog-->",
+	]);
+	check("原子区间：不碰被批注的原文", ranges.includes("正文"), false);
+
+	const ann = findInlineAnnotations(markerDoc)[0]!;
+	const revealed = buildAtomicRanges(
+		EditorState.create({
+			doc: markerDoc,
+			selection: EditorSelection.single(ann.textFrom, ann.textTo),
+		}),
+	);
+	let revealedCount = 0;
+	revealed.between(0, markerDoc.length, () => {
+		revealedCount++;
+	});
+	check("原子区间：标记已经露出来时不设原子（否则改不了标记）", revealedCount, 0);
+
+	const empty = buildAtomicRanges(EditorState.create({ doc: "没有批注的一段话" }));
+	let emptyCount = 0;
+	empty.between(0, 20, () => {
+		emptyCount++;
+	});
+	check("原子区间：没有批注时是空的", emptyCount, 0);
 }
 
 if (failures.length) {

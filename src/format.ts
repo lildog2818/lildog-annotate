@@ -330,10 +330,8 @@ export interface DecorationPlan {
  * 顺序错了它会直接抛异常。现行格式每个批注有两段要藏的标记（原文前、
  * 原文后），很容易排错，所以统一在这里排好序，调用方照着加即可。
  *
- * selections 是当前光标/选区的 [from, to] 列表：
- *   - 拖选、双击选中原文 → 露出原始标记（方便直接改）
- *   - 光标停在被藏起来的标记里 → 同样露出来
- *   - 折叠光标落在原文里或批注末尾 → 保持隐藏（刚写完批注不会一直看到标记）
+ * selections 是当前光标/选区的 [from, to] 列表，决定要不要把原始标记露出来。
+ * 判定规则见 explainReveal，那一条函数同时也给自检报告解释「是谁把它弄露的」。
  */
 export function planEditorDecorations(
 	doc: string,
@@ -343,13 +341,7 @@ export function planEditorDecorations(
 	const annotations = findInlineAnnotations(doc);
 
 	for (const ann of annotations) {
-		const reveal =
-			selections.some(
-				([from, to]) => to > from && from <= ann.to && to >= ann.from,
-			) ||
-			selections.some(([from, to]) =>
-				ann.hiddenRanges.some(([start, end]) => from > start && to < end),
-			);
+		const reveal = explainReveal(ann, selections).revealed;
 
 		if (!reveal) {
 			for (const [from, to] of ann.hiddenRanges) {
@@ -363,6 +355,50 @@ export function planEditorDecorations(
 
 	entries.sort((a, b) => a.from - b.from);
 	return { entries, annotations: annotations.length };
+}
+
+/**
+ * 这条批注现在会不会露出原始标记，以及是被哪个选区弄露的。
+ *
+ * 规则（自检报告里会照着念一遍，出问题时不用猜）：
+ *   - 选中了被批注的原文（哪怕一部分）→ 露出，方便直接改标记
+ *   - 整个标记区间被选中 → 露出
+ *   - 折叠光标落在被藏起来的标记里面 → 露出（正常点不进去，粘贴/拖动可能落进去）
+ *   - 其余一律藏住 —— 尤其不能再把「选区边界刚好碰到批注」当成露出，
+ *     否则随手选一段文字就会看到一堆 `<!--lildog: …-->`
+ */
+export function explainReveal(
+	ann: InlineAnnotation,
+	selections: ReadonlyArray<readonly [number, number]>,
+): { revealed: boolean; why: string } {
+	for (const [from, to] of selections) {
+		if (to > from && from < ann.textTo && to > ann.textFrom) {
+			return { revealed: true, why: `选区 ${from}-${to} 选中了原文` };
+		}
+	}
+	for (const [from, to] of selections) {
+		if (to <= from) continue;
+		const marker = ann.hiddenRanges.find(
+			([start, end]) => from <= start && to >= end,
+		);
+		if (marker) {
+			return {
+				revealed: true,
+				why: `选区 ${from}-${to} 整段选中了标记 ${marker[0]}-${marker[1]}`,
+			};
+		}
+	}
+	for (const [from, to] of selections) {
+		if (from !== to) continue;
+		const marker = ann.hiddenRanges.find(([start, end]) => from > start && to < end);
+		if (marker) {
+			return {
+				revealed: true,
+				why: `光标 ${from} 落在被藏起来的标记 ${marker[0]}-${marker[1]} 里面`,
+			};
+		}
+	}
+	return { revealed: false, why: "没有选区压着它" };
 }
 
 /**

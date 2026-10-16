@@ -72,22 +72,24 @@ await evaluate(`(async () => {
 	return view.getMode();
 })()`);
 
-/** 把带批注的高亮元素挂到视口中间，返回它的坐标 */
+/** 把带批注的高亮元素挂到视口中间，返回它的坐标（折行时取鼠标底下那一块） */
 async function highlightSpot(selector) {
 	return evaluate(`(() => {
 		const els = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
 		const el = els.find((item) => {
-			const r = item.getBoundingClientRect();
-			return r.width > 24 && r.height > 8 && r.top > 120 && r.bottom < window.innerHeight - 120;
+			const r = Array.from(item.getClientRects())[0] ?? item.getBoundingClientRect();
+			return r.width > 8 && r.height > 8;
 		}) ?? els[0];
 		if (!el) return null;
 		el.scrollIntoView({ block: "center" });
-		const r = el.getBoundingClientRect();
+		const rects = Array.from(el.getClientRects());
+		const r = rects[0] ?? el.getBoundingClientRect();
 		const cs = getComputedStyle(el);
 		return {
-			x: r.left + r.width / 2,
+			x: r.left + Math.min(r.width / 2, 20),
 			y: r.top + r.height / 2,
 			text: el.textContent ?? "",
+			segments: rects.length,
 			color: cs.color,
 			background: cs.backgroundColor,
 			shadow: cs.boxShadow,
@@ -164,6 +166,98 @@ check(
 	styleFallback.afterRestore.color,
 );
 
+// ---------------------------------------------------------------- 1c. 标记什么时候露出来
+
+console.log("\n【1c】原始标记的露出规则");
+const revealRule = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	const doc = editor.getValue();
+	const start = doc.indexOf("<!--lildog:");
+	const openEnd = doc.indexOf("-->", start) + 3;
+	const closeStart = doc.indexOf("<!--/lildog-->", openEnd);
+	const leaked = () =>
+		Array.from(view.containerEl.querySelectorAll(".cm-line"))
+			.filter((el) => (el.textContent ?? "").includes("lildog")).length;
+
+	// 1）选区只碰到批注起点（旧版会误判成「要露出」）
+	editor.setSelection(editor.offsetToPos(start - 4), editor.offsetToPos(start));
+	await sleep(400);
+	const touching = leaked();
+
+	// 2）真的选中被批注的原文 → 应该露出来，方便直接改标记
+	editor.setSelection(editor.offsetToPos(openEnd), editor.offsetToPos(closeStart));
+	await sleep(400);
+	const selectingText = leaked();
+
+	// 3）光标挪走 → 立刻收回去
+	editor.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 0 });
+	await sleep(400);
+	const away = leaked();
+
+	return { touching, selectingText, away };
+})()`);
+check(
+	"选区只是碰到批注边界时，不再把 <!--lildog: …--> 露出来",
+	revealRule.touching === 0,
+	`露出 ${revealRule.touching} 行`,
+);
+check(
+	"真的选中被批注的原文时，标记会露出来（方便直接改）",
+	revealRule.selectingText > 0,
+	`露出 ${revealRule.selectingText} 行`,
+);
+check("光标挪开后标记立刻收回去", revealRule.away === 0, `露出 ${revealRule.away} 行`);
+
+// 点在「被藏起来的标记」那一小段空白上：光标不能进到标记内部，
+// 否则插件会以为用户要改标记，把整条批注的原始标记亮出来
+console.log("\n【1d】点在藏起来的标记上");
+const markerSpot = await evaluate(`(() => {
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	editor.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 0 });
+	const el = document.querySelector(".cm-content .lildog-ann");
+	if (!el) return null;
+	const rect = Array.from(el.getClientRects())[0] ?? el.getBoundingClientRect();
+	const doc = editor.getValue();
+	const from = doc.indexOf("<!--lildog:");
+	const openEnd = doc.indexOf("-->", from) + 3;
+	const closeStart = doc.indexOf("<!--/lildog-->", openEnd);
+	return {
+		x: Math.round(rect.left - 1),
+		y: Math.round(rect.top + rect.height / 2),
+		hidden: [
+			[from, openEnd],
+			[closeStart, closeStart + "<!--/lildog-->".length]
+		],
+		textFrom: openEnd
+	};
+})()`);
+if (markerSpot) {
+	await cdp.click(markerSpot.x, markerSpot.y);
+	await sleep(600);
+	const afterClick = await evaluate(`(() => {
+		const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+		const editor = view.editor;
+		return {
+			cursor: editor.posToOffset(editor.getCursor()),
+			leaked: Array.from(view.containerEl.querySelectorAll(".cm-line")).filter((el) =>
+				(el.textContent ?? "").includes("lildog")
+			).length
+		};
+	})()`);
+	const insideMarker = markerSpot.hidden.some(
+		([start, end]) => afterClick.cursor > start && afterClick.cursor < end,
+	);
+	check(
+		"点在藏起来的标记上时，光标不会掉进标记里面（标记也就不会弹开）",
+		!insideMarker,
+		`光标在 ${afterClick.cursor}，标记区间 ${JSON.stringify(markerSpot.hidden)}`,
+	);
+	check("点完标记仍然藏着", afterClick.leaked === 0, `露出 ${afterClick.leaked} 行`);
+}
+
 // ---------------------------------------------------------------- 2. 悬停浮窗
 
 console.log("\n【2】悬停浮窗（直接改批注 + 回车即收）");
@@ -238,6 +332,57 @@ const afterEnter = await evaluate(`(() => {
 check("回车后浮窗立刻收起（不用再点别的地方）", afterEnter.hidden);
 check("改完的批注内容写进了笔记", afterEnter.saved);
 check("笔记正文里没有露出 lildog 标记", !afterEnter.leaked);
+
+// 每一条高亮都要能悬停出浮窗 —— 文字折行时一个高亮横跨两行，
+// 只按包围盒中心去悬停会落在两行之间的空隙上，这条就是防这个的
+console.log("\n【2b】逐条悬停都要能弹出浮窗");
+await evaluate(`(() => {
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	view.editor.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 0 });
+	return true;
+})()`);
+const highlightCount = await evaluate(
+	`(() => document.querySelectorAll(".cm-content .lildog-ann").length)()`,
+);
+const hoverFailures = [];
+for (let i = 0; i < highlightCount; i++) {
+	// 每轮现取坐标：文档在这一段里被改过，之前量的位置已经不准了
+	await evaluate(`(() => {
+		const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
+		el?.scrollIntoView({ block: "center" });
+		return true;
+	})()`);
+	await sleep(250);
+	const spot = await evaluate(`(() => {
+		const el = document.querySelectorAll(".cm-content .lildog-ann")[${i}];
+		if (!el) return null;
+		const rect = Array.from(el.getClientRects())[0] ?? el.getBoundingClientRect();
+		return {
+			text: el.textContent,
+			segments: el.getClientRects().length,
+			x: Math.round(rect.left + Math.min(rect.width / 2, 20)),
+			y: Math.round(rect.top + rect.height / 2)
+		};
+	})()`);
+	if (!spot) continue;
+	await cdp.mouse("mouseMoved", 5, 5);
+	await sleep(150);
+	await cdp.hover(spot.x, spot.y);
+	await sleep(450);
+	const cardText = await evaluate(`(() => {
+		const el = document.querySelector(".lildog-card");
+		if (!el || el.style.display === "none") return "";
+		return el.querySelector(".lildog-card-body")?.textContent ?? "";
+	})()`);
+	if (cardText.trim().length === 0) {
+		hoverFailures.push(`${spot.text}${spot.segments > 1 ? "(折行)" : ""}`);
+	}
+}
+check(
+	"每一条高亮都能悬停弹出浮窗（含折行的）",
+	highlightCount > 0 && hoverFailures.length === 0,
+	`共 ${highlightCount} 条${hoverFailures.length ? `，没弹出来的：${hoverFailures.join("、")}` : ""}`,
+);
 
 // ---------------------------------------------------------------- 3. 阅读视图
 
@@ -471,8 +616,16 @@ if (!occurrence.error) {
 
 await evaluate(`(async () => {
 	const app = window.app;
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	const file = app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
 	await app.vault.modify(file, ${JSON.stringify(original)});
+	// 编辑器的缓冲区也要跟着回去：否则文件是干净的、内存里还是改过的内容，
+	// 下一轮检查会拿到一份「文件和视图不一致」的笔记
+	const view = app.workspace.getLeavesOfType("markdown")[0]?.view;
+	if (view?.editor && view.editor.getValue() !== ${JSON.stringify(original)}) {
+		view.editor.setValue(${JSON.stringify(original)});
+		await sleep(400);
+	}
 	return true;
 })()`);
 await sleep(600);

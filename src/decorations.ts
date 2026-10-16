@@ -1,5 +1,5 @@
-import { Decoration, DecorationSet } from "@codemirror/view";
-import { RangeSetBuilder } from "@codemirror/state";
+import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
+import { RangeSet, RangeSetBuilder } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planEditorDecorations } from "./format";
 import { diag } from "./diagnostics";
@@ -41,4 +41,34 @@ export function buildEditorDecorations(state: EditorState): DecorationSet {
 		console.error("[lildog-annotate] 构建编辑器装饰失败", error);
 		return Decoration.none;
 	}
+}
+
+/**
+ * 把「被藏起来的标记」登记成 CodeMirror 的**原子区间**。
+ *
+ * 这一步不做的话，鼠标点在标记那一段（视觉上是空的）上时，光标会被塞进
+ * 标记**内部**；插件看到「光标停在标记里」就把整条批注的原始标记露出来
+ * —— 表现就是「批注着批注着，正文里突然冒出一堆 `<!--lildog: …-->`」。
+ * 登记成原子区间后，点击/方向键都会自动跳到最近的一端，光标进不去。
+ *
+ * 只登记**藏起来**的标记：标记已经露出来（用户要直接改）时不设原子，
+ * 否则光标又进不去、改不了。
+ */
+export function buildAtomicRanges(state: EditorState) {
+	try {
+		const plan = planEditorDecorations(
+			state.doc.toString(),
+			state.selection.ranges.map((range) => [range.from, range.to] as const),
+		);
+		const ranges = plan.entries
+			.filter((entry) => entry.kind === "hide" && entry.from < entry.to)
+			.map((entry) => Decoration.replace({}).range(entry.from, entry.to));
+		return ranges.length ? RangeSet.of(ranges, true) : Decoration.none;
+	} catch {
+		return Decoration.none;
+	}
+}
+
+export function createAtomicRanges() {
+	return EditorView.atomicRanges.of((view) => buildAtomicRanges(view.state));
 }
