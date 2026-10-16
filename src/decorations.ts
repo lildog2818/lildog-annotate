@@ -1,7 +1,8 @@
-import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
-import { RangeSet, RangeSetBuilder } from "@codemirror/state";
+import { Decoration, DecorationSet, EditorView, ViewPlugin } from "@codemirror/view";
+import type { ViewUpdate } from "@codemirror/view";
+import { EditorSelection, RangeSet, RangeSetBuilder } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
-import { planEditorDecorations } from "./format";
+import { findInlineAnnotations, planEditorDecorations } from "./format";
 import { diag } from "./diagnostics";
 
 /** 带批注的文字加高亮 + 虚线下划线：既是提示，也是悬停的落点 */
@@ -71,4 +72,65 @@ export function buildAtomicRanges(state: EditorState) {
 
 export function createAtomicRanges() {
 	return EditorView.atomicRanges.of((view) => buildAtomicRanges(view.state));
+}
+
+/** 光标落在被藏起来的标记里时，把它挪到最近的一端（返回新位置，没落在里面就返回 null） */
+export function cursorOutOfMarker(
+	doc: string,
+	pos: number,
+): number | null {
+	for (const ann of findInlineAnnotations(doc)) {
+		for (const [start, end] of ann.hiddenRanges) {
+			if (pos > start && pos < end) {
+				return pos - start <= end - pos ? start : end;
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * 光标守门员：把「落在藏起来的标记内部」的光标挪出来。
+ *
+ * 为什么需要它：重载 Obsidian 会恢复上次的光标位置，而这个位置完全可能
+ * 落在标记内部（例如以前点在那段空白上留下的）。光标一旦在里面，标记
+ * 就会一直露在正文里（老版本就是靠「露出」来提示这件事），正文看着很脏。
+ * 现在改成：光标自动挪到最近的一端，标记继续藏着。
+ *
+ * 用 ViewPlugin 而不是 updateListener：编辑器**初始状态**也要检查一遍
+ * （恢复的光标就在初始状态里），updateListener 不会为初始状态触发。
+ */
+export function createCursorGuard() {
+	let scheduled = false;
+	const fix = (view: EditorView) => {
+		if (scheduled) return;
+		const fixNow = () => {
+			scheduled = false;
+			const state = view.state;
+			let changed = false;
+			const ranges = state.selection.ranges.map((range) => {
+				if (!range.empty) return range;
+				const moved = cursorOutOfMarker(state.doc.toString(), range.from);
+				if (moved === null) return range;
+				changed = true;
+				return EditorSelection.cursor(moved);
+			});
+			if (!changed || view.state.selection !== state.selection) return;
+			view.dispatch({ selection: EditorSelection.create(ranges) });
+		};
+		scheduled = true;
+		// 推迟到下一帧：不在视图正在更新的过程里再派发一次事务
+		window.setTimeout(fixNow, 0);
+	};
+
+	return ViewPlugin.fromClass(
+		class {
+			constructor(view: EditorView) {
+				fix(view);
+			}
+			update(update: ViewUpdate) {
+				if (update.selectionSet || update.docChanged) fix(update.view);
+			}
+		},
+	);
 }

@@ -302,9 +302,9 @@ const planAnn = findInlineAnnotations(planDoc)[0]!;
 
 	const cursorInMarker = planEditorDecorations(planDoc, [[planAnn.from + 2, planAnn.from + 2]]);
 	check(
-		"装饰规划：光标停在被藏起来的标记里，标记露出来",
-		cursorInMarker.entries.map((e) => e.kind),
-		["mark"],
+		"装饰规划：光标落在藏起来的标记里时，标记照样藏着（光标由守门员挪出来）",
+		cursorInMarker.entries.length,
+		3,
 	);
 
 	const cursorAtEnd = planEditorDecorations(planDoc, [
@@ -333,9 +333,9 @@ const planAnn = findInlineAnnotations(planDoc)[0]!;
 		`选区 ${planAnn.textFrom}-${planAnn.textTo} 选中了原文`,
 	);
 	check(
-		"露出判定：光标落在被藏起来的标记里 → 露出，并说明位置",
-		explainReveal(planAnn, [[planAnn.from + 2, planAnn.from + 2]]).why,
-		`光标 ${planAnn.from + 2} 落在被藏起来的标记 ${planAnn.from}-${planAnn.textFrom} 里面`,
+		"露出判定：光标落在被藏起来的标记里 → 也不露（改由守门员把光标挪出来）",
+		explainReveal(planAnn, [[planAnn.from + 2, planAnn.from + 2]]),
+		{ revealed: false, why: "没有选区压着它" },
 	);
 	check(
 		"露出判定：选区只是碰到边界 → 不露",

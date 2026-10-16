@@ -20,7 +20,7 @@ import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
-import { createAtomicRanges } from "./decorations";
+import { createAtomicRanges, createCursorGuard } from "./decorations";
 import { createEditorDecorations, decorateReadingView } from "./hover";
 import { HoverCard } from "./hovercard";
 import type { HoverTarget } from "./hovercard";
@@ -97,8 +97,13 @@ export default class LildogAnnotatePlugin extends Plugin {
 		this.applyAppearance();
 
 		// 批注记号（编辑器）：标记藏起来 + 被批注的文字上色。
-		// 原子区间让光标进不到藏起来的标记里（否则一点就整条露出来）
-		this.registerEditorExtension([createEditorDecorations(), createAtomicRanges()]);
+		// 原子区间 + 光标守门员：光标进不到（也不会留在）藏起来的标记里，
+		// 否则标记会整条露在正文里
+		this.registerEditorExtension([
+			createEditorDecorations(),
+			createAtomicRanges(),
+			createCursorGuard(),
+		]);
 		// 阅读视图：给每个段落打上行号范围（阅读视图里按文字反查源码要用），
 		// 并把批注对应的文字找出来上色、记下源码偏移
 		this.registerMarkdownPostProcessor(async (el, ctx) => {

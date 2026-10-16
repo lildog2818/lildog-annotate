@@ -210,6 +210,38 @@ check(
 );
 check("光标挪开后标记立刻收回去", revealRule.away === 0, `露出 ${revealRule.away} 行`);
 
+// 复现用户现场：重载 Obsidian 会把上次的光标恢复回来，它可能正好落在
+// 藏起来的标记内部 —— 旧版这时会把整条批注的标记亮出来，而且怎么点都不消停
+const stuckCursor = await evaluate(`(async () => {
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const view = window.app.workspace.getLeavesOfType("markdown")[0].view;
+	const editor = view.editor;
+	const doc = editor.getValue();
+	const start = doc.indexOf("<!--lildog:");
+	const openEnd = doc.indexOf("-->", start) + 3;
+	editor.setSelection(editor.offsetToPos(start + 3), editor.offsetToPos(start + 3));
+	await sleep(600);
+	const after = editor.posToOffset(editor.getCursor());
+	return {
+		hidden: [start, openEnd],
+		cursor: after,
+		inside: after > start && after < openEnd,
+		leaked: Array.from(view.containerEl.querySelectorAll(".cm-line")).filter((el) =>
+			(el.textContent ?? "").includes("lildog")
+		).length
+	};
+})()`);
+check(
+	"光标被塞进藏起来的标记里时，会被自动挪出来",
+	!stuckCursor.inside,
+	`光标 ${stuckCursor.cursor}，标记区间 ${JSON.stringify(stuckCursor.hidden)}`,
+);
+check(
+	"这种情况下标记也不会露出来（正文里不会出现 <!--lildog: …-->）",
+	stuckCursor.leaked === 0,
+	`露出 ${stuckCursor.leaked} 行`,
+);
+
 // 点在「被藏起来的标记」那一小段空白上：光标不能进到标记内部，
 // 否则插件会以为用户要改标记，把整条批注的原始标记亮出来
 console.log("\n【1d】点在藏起来的标记上");

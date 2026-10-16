@@ -10,7 +10,11 @@
  */
 import { EditorSelection, EditorState } from "@codemirror/state";
 import type { Decoration } from "@codemirror/view";
-import { buildAtomicRanges, buildEditorDecorations } from "../src/decorations.ts";
+import {
+	buildAtomicRanges,
+	buildEditorDecorations,
+	cursorOutOfMarker,
+} from "../src/decorations.ts";
 import { diag, resetDiagnostics } from "../src/diagnostics.ts";
 import { findInlineAnnotations } from "../src/format.ts";
 
@@ -131,11 +135,9 @@ const markerDoc = "前<!--lildog: 为什么？-->正文<!--/lildog-->后";
 		["mark"],
 	);
 	check(
-		"光标停在被藏起来的标记里：标记露出来",
-		inspect(markerDoc, EditorSelection.cursor(ann.from + 2)).ranges.map(
-			(r) => r.kind,
-		),
-		["mark"],
+		"光标落在藏起来的标记里：标记照样藏着（老版本会整条露出来）",
+		inspect(markerDoc, EditorSelection.cursor(ann.from + 2)).ranges.length,
+		3,
 	);
 	check(
 		"刚写完批注、光标在批注末尾：标记仍然藏着",
@@ -181,6 +183,34 @@ const markerDoc = "前<!--lildog: 为什么？-->正文<!--/lildog-->后";
 		emptyCount++;
 	});
 	check("原子区间：没有批注时是空的", emptyCount, 0);
+}
+
+// ------------------------------------------- 光标守门员：把落在标记里的光标挪出来
+// 重载 Obsidian 会恢复上次的光标位置，它可能正好落在标记内部 ——
+// 老版本会把标记整条露出来，正文里就出现一堆 <!--lildog: …-->
+{
+	const ann = findInlineAnnotations(markerDoc)[0]!;
+	check(
+		"守门员：光标在标记内部 → 挪到离得近的那一端",
+		cursorOutOfMarker(markerDoc, ann.from + 2),
+		ann.from,
+	);
+	check(
+		"守门员：靠近尾部时挪到尾部",
+		cursorOutOfMarker(markerDoc, ann.textFrom - 1),
+		ann.textFrom,
+	);
+	check(
+		"守门员：光标在原文里 → 不动",
+		cursorOutOfMarker(markerDoc, ann.textFrom + 1),
+		null,
+	);
+	check(
+		"守门员：光标在批注外面 → 不动",
+		cursorOutOfMarker(markerDoc, 0),
+		null,
+	);
+	check("守门员：没有批注的文档不报错", cursorOutOfMarker("普通文字", 1), null);
 }
 
 if (failures.length) {

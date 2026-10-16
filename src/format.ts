@@ -363,9 +363,12 @@ export function planEditorDecorations(
  * 规则（自检报告里会照着念一遍，出问题时不用猜）：
  *   - 选中了被批注的原文（哪怕一部分）→ 露出，方便直接改标记
  *   - 整个标记区间被选中 → 露出
- *   - 折叠光标落在被藏起来的标记里面 → 露出（正常点不进去，粘贴/拖动可能落进去）
- *   - 其余一律藏住 —— 尤其不能再把「选区边界刚好碰到批注」当成露出，
- *     否则随手选一段文字就会看到一堆 `<!--lildog: …-->`
+ *   - 其余一律藏住
+ *
+ * 注意**没有**「光标停在标记里就露出」这一条：重载 Obsidian 会恢复上次的
+ * 光标位置，它可能正好落在标记内部，于是正文里就冒出一堆 `<!--lildog: …-->`
+ * 而且怎么点都不消停。光标进标记这件事交给 createCursorGuard 处理
+ * （把光标挪到最近的一端），不再拿「露出标记」当提示。
  */
 export function explainReveal(
 	ann: InlineAnnotation,
@@ -385,16 +388,6 @@ export function explainReveal(
 			return {
 				revealed: true,
 				why: `选区 ${from}-${to} 整段选中了标记 ${marker[0]}-${marker[1]}`,
-			};
-		}
-	}
-	for (const [from, to] of selections) {
-		if (from !== to) continue;
-		const marker = ann.hiddenRanges.find(([start, end]) => from > start && to < end);
-		if (marker) {
-			return {
-				revealed: true,
-				why: `光标 ${from} 落在被藏起来的标记 ${marker[0]}-${marker[1]} 里面`,
 			};
 		}
 	}

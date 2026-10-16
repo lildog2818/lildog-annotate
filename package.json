@@ -1,6 +1,6 @@
 {
   "name": "lildog-annotate",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "选中文字即可加批注的 Obsidian 插件：批注以纯文本标记写入笔记，人或 AI 都能直接读取。",
   "main": "main.js",
   "scripts": {
