@@ -63,7 +63,18 @@ export class AnnotateModal extends Modal {
 						this.submit();
 					}
 				});
-				window.setTimeout(() => ta.inputEl.focus(), 0);
+				// 表格格子被点开时，Obsidian 在格子里开了个嵌套编辑器，它会**把焦点抢回去**：
+				// 弹窗开着，你打的字却进了单元格。这里只在「焦点被格子编辑器抢走」时抢回来，
+				// 你要是自己点到别处去了，不去打扰。
+				const keepFocus = () => {
+					if (this.submitted) return;
+					const active = document.activeElement as HTMLElement | null;
+					const stolenByCell = !!active?.closest?.("td .cm-editor, th .cm-editor");
+					if (!active || active === document.body || stolenByCell) {
+						ta.inputEl.focus();
+					}
+				};
+				for (const delay of [0, 80, 240]) window.setTimeout(keepFocus, delay);
 			});
 
 		const buttons = contentEl.createDiv({ cls: "lildog-modal-buttons" });

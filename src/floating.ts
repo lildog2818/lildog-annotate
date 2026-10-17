@@ -1,17 +1,22 @@
 import { MarkdownView, setIcon } from "obsidian";
+import type { ResolvedAnchor } from "./anchor";
 
 /**
  * 选中文字后浮在选区上方的「批注」小按钮。
  *
  * 锚点用**源码偏移**而不是编辑器位置：阅读视图、编辑器里的表格（块级 widget）
- * 都拿不到编辑器选区，只能靠 DOM 里的文字反查源码，偏移是唯一通用的坐标。
+ * 都拿不到编辑器选区。能当场算准的（编辑器普通选区）就存 anchor；
+ * 表格 / 阅读视图里算不准的，只留下 DOM 选区，等点按钮那一刻再算 ——
+ * 那期间表格可能刚被 Obsidian 重建过，早算的偏移会过期。
  */
 export interface SelectionSnapshot {
 	view: MarkdownView;
-	/** 选中的文字 */
+	/** 选中的文字（展示 / 日志用） */
 	text: string;
-	fromOffset: number;
-	toOffset: number;
+	/** 已经算准的锚点；null = 点按钮那一刻再解析 */
+	anchor: ResolvedAnchor | null;
+	/** DOM 里的选区（克隆一份，点按钮那一刻再解析时用） */
+	range: Range | null;
 }
 
 export class FloatingAnnotateButton {

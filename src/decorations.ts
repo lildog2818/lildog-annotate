@@ -1,8 +1,9 @@
 import { Decoration, DecorationSet, EditorView, ViewPlugin } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
 import { EditorSelection, RangeSet, RangeSetBuilder } from "@codemirror/state";
-import type { EditorState } from "@codemirror/state";
+import type { EditorState, Text } from "@codemirror/state";
 import { findInlineAnnotations, planEditorDecorations } from "./format";
+import type { DecorationEntry, DecorationPlan } from "./format";
 import { diag } from "./diagnostics";
 
 /** 带批注的文字加高亮 + 虚线下划线：既是提示，也是悬停的落点 */
@@ -10,6 +11,39 @@ const annotatedMark = Decoration.mark({ class: "lildog-ann" });
 
 /** 把标记从正文里彻底藏掉（照社区跑通的写法，显式关掉 inclusive） */
 const hiddenMarker = Decoration.replace({ inclusive: false });
+
+interface PlanCacheEntry {
+	/** 这份规划是按哪套选区算出来的（选区一变，「露不露标记」就跟着变） */
+	selectionKey: string;
+	plan: DecorationPlan;
+}
+
+/**
+ * 「文档 + 选区 → 装饰规划」的单份缓存。
+ *
+ * 同一份文档、同一套选区，在一次输入里最多会被问四遍：装饰本体、原子区间、
+ * 光标守门员、widget 底色。每一遍都要把整篇正则扫一次、再 `doc.toString()` 一次 ——
+ * 笔记一大，打字就会卡在重复的解析上。用 `state.doc`（Text 对象）当键缓存：
+ * 文档一变就是新对象，键自然失配，不会读到旧结果。
+ */
+const planCache = new WeakMap<Text, PlanCacheEntry>();
+
+function selectionKeyOf(state: EditorState): string {
+	return state.selection.ranges.map((range) => `${range.from}-${range.to}`).join(",");
+}
+
+function planFor(state: EditorState): DecorationPlan {
+	const selectionKey = selectionKeyOf(state);
+	const cached = planCache.get(state.doc);
+	if (cached && cached.selectionKey === selectionKey) return cached.plan;
+
+	const plan = planEditorDecorations(
+		state.doc.toString(),
+		state.selection.ranges.map((range) => [range.from, range.to] as const),
+	);
+	planCache.set(state.doc, { selectionKey, plan });
+	return plan;
+}
 
 /**
  * 构建编辑器里的装饰。
@@ -20,10 +54,7 @@ const hiddenMarker = Decoration.replace({ inclusive: false });
  */
 export function buildEditorDecorations(state: EditorState): DecorationSet {
 	try {
-		const plan = planEditorDecorations(
-			state.doc.toString(),
-			state.selection.ranges.map((range) => [range.from, range.to] as const),
-		);
+		const plan = planFor(state);
 		diag.editorBuilds++;
 		diag.editorAnnotationsSeen = plan.annotations;
 
@@ -57,12 +88,8 @@ export function buildEditorDecorations(state: EditorState): DecorationSet {
  */
 export function buildAtomicRanges(state: EditorState) {
 	try {
-		const plan = planEditorDecorations(
-			state.doc.toString(),
-			state.selection.ranges.map((range) => [range.from, range.to] as const),
-		);
-		const ranges = plan.entries
-			.filter((entry) => entry.kind === "hide" && entry.from < entry.to)
+		const ranges = planFor(state)
+			.entries.filter((entry) => entry.kind === "hide" && entry.from < entry.to)
 			.map((entry) => Decoration.replace({}).range(entry.from, entry.to));
 		return ranges.length ? RangeSet.of(ranges, true) : Decoration.none;
 	} catch {
@@ -89,6 +116,20 @@ export function cursorOutOfMarker(
 	return null;
 }
 
+/** 同上，但直接读已经算好的装饰规划（守门员每动一次光标都会问，别再扫一遍全文） */
+function cursorOutOfHidden(
+	entries: DecorationEntry[],
+	pos: number,
+): number | null {
+	for (const entry of entries) {
+		if (entry.kind !== "hide") continue;
+		if (pos > entry.from && pos < entry.to) {
+			return pos - entry.from <= entry.to - pos ? entry.from : entry.to;
+		}
+	}
+	return null;
+}
+
 /**
  * 光标守门员：把「落在藏起来的标记内部」的光标挪出来。
  *
@@ -107,10 +148,13 @@ export function createCursorGuard() {
 		const fixNow = () => {
 			scheduled = false;
 			const state = view.state;
+			// 藏起来的标记就是「当前没被选区压着」的那些：拿装饰规划，不再自己扫全文
+			const hidden = planFor(state).entries.filter((entry) => entry.kind === "hide");
+			if (!hidden.length) return;
 			let changed = false;
 			const ranges = state.selection.ranges.map((range) => {
 				if (!range.empty) return range;
-				const moved = cursorOutOfMarker(state.doc.toString(), range.from);
+				const moved = cursorOutOfHidden(hidden, range.from);
 				if (moved === null) return range;
 				changed = true;
 				return EditorSelection.cursor(moved);
@@ -146,15 +190,22 @@ const WIDGET_CLASS = "lildog-ann-widget";
  *
  * Obsidian 的行内公式元素是 `span.math`（不是 `.cm-widget`），所以两个都扫。
  * 按文档位置判断它在不在某条批注的原文范围里，在的话补一个类，样式里给同样的底色。
+ *
+ * 补画是**成帧合并**的：一次输入会连着来好几个 update，攒到下一帧只画一次。
  */
 export function createWidgetHighlighter() {
 	const paint = (view: EditorView) => {
-		const doc = view.state.doc.toString();
-		if (!doc.includes("lildog")) return;
-		const annotations = findInlineAnnotations(doc);
-		for (const el of Array.from(
+		// 批注原文的区间就是规划里的 mark 条目（装饰已经算过一遍，这里直接复用）
+		const ranges = planFor(view.state).entries.filter((entry) => entry.kind === "mark");
+		const widgets = Array.from(
 			view.dom.querySelectorAll<HTMLElement>(".math, .cm-widget, .cm-inline-math"),
-		)) {
+		);
+		if (!ranges.length) {
+			// 批注全删了：widget 的 DOM 不会自己重建，得把之前补过的底色收回来
+			for (const el of widgets) el.removeClass(WIDGET_CLASS);
+			return;
+		}
+		for (const el of widgets) {
 			let pos: number | null = null;
 			try {
 				pos = view.posAtDOM(el);
@@ -162,8 +213,7 @@ export function createWidgetHighlighter() {
 				pos = null;
 			}
 			const inside =
-				pos !== null &&
-				annotations.some((ann) => pos! >= ann.textFrom && pos! <= ann.textTo);
+				pos !== null && ranges.some((range) => pos! >= range.from && pos! <= range.to);
 			if (inside) el.addClass(WIDGET_CLASS);
 			else el.removeClass(WIDGET_CLASS);
 		}
@@ -171,12 +221,24 @@ export function createWidgetHighlighter() {
 
 	return ViewPlugin.fromClass(
 		class {
-			constructor(view: EditorView) {
-				window.setTimeout(() => paint(view), 0);
+			private queued = false;
+
+			constructor(private view: EditorView) {
+				this.queue();
 			}
+
 			update(update: ViewUpdate) {
 				if (!update.docChanged && !update.selectionSet && !update.viewportChanged) return;
-				window.setTimeout(() => paint(update.view), 0);
+				this.queue();
+			}
+
+			private queue(): void {
+				if (this.queued) return;
+				this.queued = true;
+				window.setTimeout(() => {
+					this.queued = false;
+					paint(this.view);
+				}, 0);
 			}
 		},
 	);

@@ -3,32 +3,42 @@ import type { EditorPosition } from "obsidian";
 import { hexToRgba } from "./colors";
 import {
 	blockInsertLine,
-	canUseInline,
+	canUseInlineInTable,
+	explainInlineRefusal,
 	extendToBalanceBackticks,
 	findBlockAtLine,
 	findInlineAnnotations,
-	lineOffsets,
-	locateText,
+	isAnnotationInTable,
+	MARKER,
 	planLegacyMigration,
 	serializeBlock,
 	serializeBlockWithQuote,
 	serializeInline,
 } from "./format";
-import type { TextLocation } from "./format";
 import { AnnotateModal } from "./modal";
 import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { FloatingAnnotateButton } from "./floating";
 import type { SelectionSnapshot } from "./floating";
 import {
+	currentDomRange,
+	isCellSelection,
+	reanchorInCell,
+	resolveCursorCell,
+	resolveDomSelection,
+	resolveEditorSelection,
+} from "./anchor";
+import type { ResolvedAnchor } from "./anchor";
+import {
 	createAtomicRanges,
 	createCursorGuard,
 	createWidgetHighlighter,
 } from "./decorations";
-import { createEditorDecorations, decorateReadingView } from "./hover";
+import { createEditorDecorations, decorateReadingView, redecorateTableCells } from "./hover";
 import { HoverCard } from "./hovercard";
 import type { HoverTarget } from "./hovercard";
 import { rectUnderPointer, resolveHighlight } from "./resolve";
+import { isOffsetOnDelimiterRow } from "./tablemap";
 import { writeSelfCheckReport } from "./selfcheck";
 import { DEFAULT_SETTINGS, LildogSettingTab, sanitizeSettings } from "./settings";
 import type { AnnotationMode, LildogSettings } from "./settings";
@@ -45,18 +55,9 @@ interface FoundAnnotation {
 	body: string;
 }
 
-/** 一段待批注的原文，用源码偏移表示（编辑器位置在阅读视图里拿不到） */
-interface SourceRange {
-	text: string;
-	fromOffset: number;
-	toOffset: number;
-	/** 选区所在的视图，插入后用它把改动落盘 */
+/** 落盘时要知道改动写在哪个视图里（阅读视图得自己写文件） */
+interface PersistContext {
 	view?: MarkdownView;
-}
-
-/** 比对两段文字时先压掉空白，避免渲染差异导致误判 */
-function sameText(a: string, b: string): boolean {
-	return a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
 }
 
 function describeTarget(target: HTMLElement | null): string {
@@ -68,32 +69,14 @@ function describeTarget(target: HTMLElement | null): string {
 	return `${target.tagName.toLowerCase()}${cls}`;
 }
 
-/**
- * 选区在 DOM 里的起点，占整段文字的百分比。
- *
- * 同一段文字在笔记里出现多次时，光靠文字内容分不出是哪一处（这正是以前
- * 「批注会加在第一处」的原因）。这里量一个相对位置，让源码里的查找就近命中。
- */
-function domRatio(el: HTMLElement, range: Range): number {
-	const total = (el.textContent ?? "").length;
-	if (total <= 0) return 0;
-	try {
-		const before = document.createRange();
-		before.setStart(el, 0);
-		before.setEnd(range.startContainer, range.startOffset);
-		const index = before.toString().length;
-		return Math.min(1, Math.max(0, index / total));
-	} catch {
-		return 0;
-	}
-}
-
 export default class LildogAnnotatePlugin extends Plugin {
 	settings: LildogSettings = { ...DEFAULT_SETTINGS };
 	private floating: FloatingAnnotateButton | null = null;
 	private hoverCard: HoverCard | null = null;
 	/** 刚写完批注的一小段时间里不弹浮窗（见 persist） */
 	private hoverSuppressedUntil = 0;
+	/** 表格高亮补画的定时器（见 scheduleTableRedecorate） */
+	private tableRedecorateTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -152,17 +135,26 @@ export default class LildogAnnotatePlugin extends Plugin {
 			name: "运行自检（把诊断报告写进库里的 DSH 目录）",
 			icon: "stethoscope",
 			callback: async () => {
-				const path = await writeSelfCheckReport(
-					this.app,
-					this.manifest.version,
-					this.settings,
-				);
-				new Notice(`自检报告已写入：${path}\n构建：${BUILD_ID}`);
+				// 写报告本身也可能失败（库被别的进程占着、DSH 目录建不出来）：
+				// 那样至少要说一声，别让命令看起来「点了没反应」
+				try {
+					const path = await writeSelfCheckReport(
+						this.app,
+						this.manifest.version,
+						this.settings,
+					);
+					new Notice(`自检报告已写入：${path}\n构建：${BUILD_ID}`);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.error("[lildog-annotate] 写自检报告失败", error);
+					new Notice(`自检报告没有写成：${message}`);
+				}
 			},
 		});
 
 		this.registerEvent(
 			this.app.workspace.on("editor-menu", (menu, editor) => {
+
 				if (editor.somethingSelected()) {
 					menu.addItem((item) =>
 						item
@@ -203,6 +195,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 		);
 		this.register(() => this.floating?.destroy());
 		this.registerDomEvent(document, "mouseup", (evt) => this.handleMouseUp(evt));
+
 		this.registerDomEvent(document, "mouseover", (evt) => this.handleHoverStart(evt), true);
 		this.registerDomEvent(document, "mouseout", (evt) => this.handleHoverEnd(evt), true);
 		this.registerDomEvent(
@@ -213,6 +206,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 				if (evt.key !== "Enter" && evt.key !== "Escape") return;
 				if (this.hoverCard?.contains(evt.target as Node)) return;
 				this.hoverCard?.hide();
+				this.scheduleTableRedecorate();
 			},
 			true,
 		);
@@ -231,11 +225,15 @@ export default class LildogAnnotatePlugin extends Plugin {
 		);
 		// 正文一变（打字、撤销、别的插件改动），浮窗里的偏移就失效了，直接收起
 		this.registerEvent(
-			this.app.workspace.on("editor-change", () => this.hoverCard?.hide()),
+			this.app.workspace.on("editor-change", () => {
+				this.hoverCard?.hide();
+				this.scheduleTableRedecorate();
+			}),
 		);
 	}
 
 	onunload(): void {
+		if (this.tableRedecorateTimer !== null) window.clearTimeout(this.tableRedecorateTimer);
 		this.clearAppearance();
 		removeStyles();
 	}
@@ -353,7 +351,9 @@ export default class LildogAnnotatePlugin extends Plugin {
 			new Notice("这条批注已经变化，请重新悬停后再改");
 			return;
 		}
-		const replacement = serializeInline(ann.text, body);
+		const replacement = serializeInline(ann.text, body, {
+			inTable: isAnnotationInTable(doc, ann.from),
+		});
 		editor.replaceRange(
 			replacement,
 			editor.offsetToPos(ann.from),
@@ -361,12 +361,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 		);
 		// 光标落在整条批注之后：标记立刻收起，不用再点别处
 		editor.setCursor(editor.offsetToPos(ann.from + replacement.length));
-		this.persist(editor, {
-			text: ann.text,
-			fromOffset: ann.from,
-			toOffset: ann.to,
-			view: target.view,
-		});
+		this.persist(editor, { view: target.view });
 		diag.hoverEdits++;
 	}
 
@@ -414,48 +409,80 @@ export default class LildogAnnotatePlugin extends Plugin {
 
 	// ---------------------------------------------------------------- 入口
 
-	/** 选区上方的小按钮被点击 */
+	/** 选区上方的小按钮被点击：这一刻才把 DOM 选区翻译成源码偏移 */
 	private annotateSnapshot(snapshot: SelectionSnapshot): void {
 		const editor = snapshot.view.editor;
-		// 阅读视图里不去动编辑器焦点，免得把视图切走
-		if (snapshot.view.getMode() !== "preview") {
-			editor.focus();
-			editor.setSelection(
-				editor.offsetToPos(snapshot.fromOffset),
-				editor.offsetToPos(snapshot.toOffset),
-			);
+		let anchor = snapshot.anchor;
+		if (!anchor) {
+			if (!snapshot.range) return;
+			// 不去动编辑器焦点、也不预先设置编辑器选区：
+			// 那一步会主动把光标推进表格，反而让 Obsidian 去重建表格
+			const resolved = resolveDomSelection(snapshot.view, editor, snapshot.range);
+			if (!resolved.ok) {
+				new Notice(`${resolved.reason}\n${resolved.hint}`);
+				diag.lastSelection = `拒绝写入：${resolved.reason}`;
+				return;
+			}
+			anchor = resolved.anchor;
 		}
-		this.openComposer(editor, {
-			text: snapshot.text,
-			fromOffset: snapshot.fromOffset,
-			toOffset: snapshot.toOffset,
-			view: snapshot.view,
-		});
+		diag.lastSelection = `定位成功：${anchor.how}`;
+		this.openComposer(editor, anchor);
 	}
 
 	private addAnnotation(editor: Editor): void {
-		const text = editor.getSelection();
-		if (!text.trim()) {
-			new Notice("请先选中要批注的文字");
-			return;
-		}
 		this.floating?.hide();
 		this.hoverCard?.hide();
-		this.openComposer(editor, {
-			text,
-			fromOffset: editor.posToOffset(editor.getCursor("from")),
-			toOffset: editor.posToOffset(editor.getCursor("to")),
-			view: this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined,
-		});
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) {
+			new Notice("当前没有 Markdown 视图");
+			return;
+		}
+
+		const domRange = currentDomRange();
+		// 浏览器里正选着格子里的字（表格是块级 widget，这时编辑器选区可能还停在别处）：
+		// 那条路交给 DOM 定位。浏览器里没有选区时，编辑器选区就是唯一可信的来源 ——
+		// 别因为它「在表格行里」就拒绝：整行选区走的正是这条路。
+		const direct = isCellSelection(domRange)
+			? null
+			: resolveEditorSelection(view, editor, editor.getSelection());
+		if (direct?.ok) {
+			this.openComposer(editor, direct.anchor);
+			return;
+		}
+
+		if (domRange) {
+			const resolved = resolveDomSelection(view, editor, domRange);
+			if (resolved.ok) {
+				this.openComposer(editor, resolved.anchor);
+				return;
+			}
+			new Notice(`${resolved.reason}\n${resolved.hint}`);
+			diag.lastSelection = `拒绝写入：${resolved.reason}`;
+			return;
+		}
+
+		// 什么都没选：光标停在表格单元格里就批注整格
+		// （实时预览里跨格拖选会被 Obsidian 的格子编辑器接管，这条入口不看鼠标）
+		const byCell = resolveCursorCell(view, editor);
+		if (byCell?.ok) {
+			this.openComposer(editor, byCell.anchor);
+			return;
+		}
+		if (byCell && !byCell.ok) {
+			new Notice(`${byCell.reason}\n${byCell.hint}`);
+			return;
+		}
+
+		new Notice("请先选中要批注的文字（光标停在表格单元格里也行：会批注整格）");
 	}
 
 	/**
 	 * 选中文字后决定要不要浮出按钮。
 	 *
-	 * 编辑器里的普通选区位置精确，直接用；阅读视图、以及编辑器里被渲染成
-	 * 块级 widget 的表格等位置，编辑器选区拿不到，就退回「用 DOM 里的文字
-	 * 反查源码」，并按选区在段落里的相对位置就近命中 —— 同一段文字重复出现
-	 * 时，批注加在**你选的那一处**，而不是第一处。
+	 * 编辑器里的普通选区偏移本来就是准的，当场定下来；表格（块级 widget）和阅读视图里
+	 * 编辑器选区拿不到，就只记下 DOM 选区，等点按钮那一刻再算 —— 这中间表格可能刚被
+	 * Obsidian 重建过，早算的偏移会过期。算不准的时候按钮点下去会明确告诉你为什么，
+	 * 而**不会**写到别的位置去。
 	 */
 	private handleMouseUp(evt: MouseEvent): void {
 		if (!this.settings.showFloatingButton) {
@@ -469,17 +496,12 @@ export default class LildogAnnotatePlugin extends Plugin {
 		const domText = collapsed ? "" : selection!.toString();
 		const range = collapsed ? null : selection!.getRangeAt(0);
 		const rect = range ? range.getBoundingClientRect() : null;
-		const anchor = range ? range.startContainer.parentElement : null;
 
 		const target = evt.target as HTMLElement | null;
 		const inEditor = !!target?.closest(".cm-editor");
+		const inCell = !!target?.closest("td, th");
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		const editor = view?.editor ?? null;
-		const editorText = editor && editor.somethingSelected() ? editor.getSelection() : "";
-		// 只有编辑器选区跟浏览器里选中的是同一段文字时才用它，
-		// 否则可能是残留的旧选区（比如鼠标正在表格 widget 里选字）
-		const useEditorSelection =
-			inEditor && !!editorText.trim() && sameText(editorText, domText);
 
 		let action: string;
 		let snapshot: SelectionSnapshot | null = null;
@@ -490,79 +512,77 @@ export default class LildogAnnotatePlugin extends Plugin {
 			action = "当前没有 Markdown 视图";
 		} else if (!rect) {
 			action = "拿不到选区矩形";
-		} else if (useEditorSelection) {
-			snapshot = {
-				view,
-				text: editorText,
-				fromOffset: editor.posToOffset(editor.getCursor("from")),
-				toOffset: editor.posToOffset(editor.getCursor("to")),
-			};
-			action = "浮出按钮（编辑器选区）";
-		} else {
-			const doc = editor.getValue();
-			const located = this.locateInSection(doc, domText, anchor, range);
-			if (!located) {
-				action = "没能在源码里定位到选中的文字";
+		} else if (inEditor && !inCell) {
+			const direct = resolveEditorSelection(view, editor, domText);
+			if (direct?.ok) {
+				snapshot = { view, text: direct.anchor.text, anchor: direct.anchor, range: null };
+				action = `浮出按钮（${direct.anchor.how}）`;
 			} else {
+				// 编辑器选区是旧的（跟 DOM 里选中的对不上）：改用 DOM 选区，点按钮时再算
 				snapshot = {
 					view,
-					text: doc.slice(located.fromOffset, located.toOffset),
-					fromOffset: located.fromOffset,
-					toOffset: located.toOffset,
+					text: domText,
+					anchor: null,
+					range: range!.cloneRange(),
 				};
-				action = `浮出按钮（按文字反查，${located.matches} 处相同，取选区所在那一处）`;
+				action = "浮出按钮（编辑器选区对不上，改按 DOM 选区定位）";
 			}
+		} else {
+			snapshot = { view, text: domText, anchor: null, range: range!.cloneRange() };
+			action = inCell
+				? "浮出按钮（表格单元格：点按钮时再定位）"
+				: "浮出按钮（阅读视图：点按钮时再定位）";
 		}
 
 		diag.lastSelection =
-			`target=${describeTarget(target)} | 在编辑器内=${inEditor} | 编辑器选区=${editorText.trim().length > 0} | ` +
+			`target=${describeTarget(target)} | 在编辑器内=${inEditor} | 在单元格内=${inCell} | ` +
 			`浏览器选区折叠=${collapsed} | 矩形=${rect ? `${Math.round(rect.width)}x${Math.round(rect.height)}` : "无"} | ` +
 			`模式=${view ? view.getMode() : "无"} | 动作=${action}`;
+
+		// 点开表格外面时，Obsidian 会把格子的缓存渲染顶上来：这里排队补画一次高亮
+		// （拖选中（选区没塌）先不打扰，免得插节点影响正在进行的选区）
+		const live = window.getSelection();
+		if (!live || live.isCollapsed) this.scheduleTableRedecorate();
 
 		if (!snapshot || !rect) return;
 		this.floating?.show(snapshot, rect);
 	}
 
-	/**
-	 * 在选区所属段落（阅读视图里打了行号）的源码范围内找这段文字。
-	 * 找不到再退回全文，并且都带上「选区在 DOM 里的相对位置」作为就近依据。
-	 */
-	private locateInSection(
-		doc: string,
-		text: string,
-		anchor: Element | null,
-		range: Range | null,
-	): TextLocation | null {
-		const sectionEl = anchor?.closest("[data-lildog-start]") as HTMLElement | null;
-		const ratio = sectionEl && range ? domRatio(sectionEl, range) : 0;
-
-		if (sectionEl) {
-			const startLine = Number(sectionEl.dataset.lildogStart);
-			const endLine = Number(sectionEl.dataset.lildogEnd);
-			if (Number.isFinite(startLine) && Number.isFinite(endLine)) {
-				const offsets = lineOffsets(doc);
-				const start = offsets[startLine] ?? 0;
-				const end = offsets[endLine + 1] ?? doc.length;
-				const prefer = start + ratio * Math.max(0, end - start);
-				const hit = locateText(doc, text, start, end, prefer);
-				if (hit) return hit;
-			}
-		}
-		return locateText(doc, text, 0, doc.length, ratio * doc.length);
-	}
-
 	// ---------------------------------------------------------------- 写入
 
-	private openComposer(editor: Editor, range: SourceRange): void {
-		let mode = this.settings.mode;
-		if (mode === "inline" && !canUseInline(range.text)) {
-			mode = "block";
-			new Notice("选区跨行（或含有注释起始符），已改用段落批注");
+	private openComposer(editor: Editor, anchor: ResolvedAnchor): void {
+		// 分隔行是整张表的地基（`| --- | --- |` 里那一格必须长这样），批注它没有意义，
+		// 写进去还会让**整张表立刻不成表**。四种入口都从这里过，所以在这里一口回绝。
+		if (isOffsetOnDelimiterRow(editor.getValue(), anchor.fromOffset)) {
+			new Notice("这里是表格的分隔行（`| --- | --- |`），不能批注。请选中表格里的内容。");
+			return;
 		}
+
+		let mode = this.settings.mode;
+		if (mode === "inline") {
+			// 表格里、或者文字本身就不适合行内时，改用段落批注 —— 判据只有 explainInlineRefusal 一处
+			const refusal = explainInlineRefusal(
+				editor.getValue(),
+				anchor.fromOffset,
+				anchor.text,
+			);
+			if (refusal) {
+				mode = "block";
+				new Notice(
+					`${refusal}，已改用段落批注${anchor.crossCell ? "（会插在整张表之后）" : ""}`,
+				);
+			}
+		}
+
+		// 表格格子被点开时里面有个嵌套编辑器，它会跟弹窗抢焦点（字会打进格子里）。
+		// 先让它失焦：Obsidian 会顺势把那一格提交、把表格重排 —— 偏移过期由
+		// insertAnnotation 里的「同一格里重新对位」兜住。
+		const active = document.activeElement as HTMLElement | null;
+		if (active && active.closest?.("td, th")) active.blur();
 
 		// 记下当前看到哪儿了：弹窗关掉（尤其是没保存那次）以后要还回去，
 		// 否则焦点回到编辑器时会滚到光标那儿去 —— 看着就像「光标跳到笔记开头」
-		const view = range.view;
+		const view = anchor.view;
 		const scroll = view ? view.editor.getScrollInfo() : null;
 		const previewScroller =
 			view && view.getMode() === "preview"
@@ -572,8 +592,17 @@ export default class LildogAnnotatePlugin extends Plugin {
 
 		new AnnotateModal(this.app, {
 			title: mode === "inline" ? "添加行内批注" : "添加段落批注",
-			quote: range.text,
-			onSubmit: (body) => this.insertAnnotation(editor, mode, range, body),
+			quote: anchor.text,
+			// 写入过程别把异常吞掉：吞掉的后果正是「点了保存，什么都没发生」
+			onSubmit: (body) => {
+				try {
+					this.insertAnnotation(editor, mode, anchor, body);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.error("[lildog-annotate] 写入批注失败", error);
+					new Notice(`批注没有写入：${message}`);
+				}
+			},
 			onClose: (saved) => {
 				if (saved) return;
 				this.restoreScroll(view ?? null, scroll, previewScroller, previewTop);
@@ -603,54 +632,78 @@ export default class LildogAnnotatePlugin extends Plugin {
 		for (const delay of [30, 160, 420]) window.setTimeout(restore, delay);
 	}
 
+	/**
+	 * 取锚点当前的偏移。
+	 *
+	 * 锚点是在点「批注」按钮那一刻算的，弹窗期间正文可能已经变了：表格格子被点开时
+	 * Obsidian 会在格子里开嵌套编辑器，弹窗一抢焦点它就提交那一格、顺手把整张表重排，
+	 * 偏移整体平移 —— 这时候直接用旧偏移就会「批注不起」。
+	 * 表格锚点记着格号，能在**同一格**里重新对位；对不上就返回 null（拒绝写入，不猜）。
+	 */
+	private freshOffsets(
+		editor: Editor,
+		anchor: ResolvedAnchor,
+	): { fromOffset: number; toOffset: number } | null {
+		const doc = editor.getValue();
+		if (doc.slice(anchor.fromOffset, anchor.toOffset) === anchor.text) {
+			return { fromOffset: anchor.fromOffset, toOffset: anchor.toOffset };
+		}
+		if (!anchor.cell) return null;
+		const fixed = reanchorInCell(doc, anchor.cell, anchor.text);
+		if (!fixed) return null;
+		diag.lastSelection = `偏移过期，已在同一格里重新对位：${fixed.from}-${fixed.to}`;
+		return { fromOffset: fixed.from, toOffset: fixed.to };
+	}
+
 	private insertAnnotation(
 		editor: Editor,
 		mode: AnnotationMode,
-		range: SourceRange,
+		anchor: ResolvedAnchor,
 		body: string,
 	): void {
 		const doc = editor.getValue();
 
+		this.hoverCard?.hide();
+
+		// 先按锚点取当前偏移：弹窗开着的时候表格可能被 Obsidian 重排过，
+		// 偏移会整体平移（下面「已经是某条批注的一部分」的判定也得用新偏移，否则
+		// 拿旧偏移去比会误判成嵌套、或者漏判）
+		const offsets = this.freshOffsets(editor, anchor);
+		if (!offsets) {
+			new Notice("原文已经变化，批注没有写入，请重新选中");
+			return;
+		}
+
 		// 已经是某条批注的一部分，就别再套一层（嵌套标记会把解析搞乱）
 		const nested = findInlineAnnotations(doc).find(
-			(ann) => range.fromOffset < ann.to && range.toOffset > ann.from,
+			(ann) => offsets.fromOffset < ann.to && offsets.toOffset > ann.from,
 		);
 		if (nested) {
 			new Notice("这段文字已经在一条批注里了");
 			return;
 		}
 
-		this.hoverCard?.hide();
-
 		if (mode === "inline") {
-			if (doc.slice(range.fromOffset, range.toOffset) !== range.text) {
-				new Notice("原文已经变化，批注没有写入，请重新选中");
-				return;
-			}
 			// 选区带反引号但没配对时，把结尾补上，别把代码块劈开
-			const toOffset = extendToBalanceBackticks(
-				doc,
-				range.fromOffset,
-				range.toOffset,
-			);
-			const replacement = serializeInline(doc.slice(range.fromOffset, toOffset), body);
+			const toOffset = extendToBalanceBackticks(doc, offsets.fromOffset, offsets.toOffset);
+			// 表格行里：正文里的 `|` 必须转义，否则会把那一行多切一格
+			const replacement = serializeInline(doc.slice(offsets.fromOffset, toOffset), body, {
+				inTable: anchor.inTable,
+			});
 			editor.replaceRange(
 				replacement,
-				editor.offsetToPos(range.fromOffset),
+				editor.offsetToPos(offsets.fromOffset),
 				editor.offsetToPos(toOffset),
 			);
 			// 光标停在整条批注之后：标记马上就藏起来，不用再点一下别的地方
-			editor.setCursor(editor.offsetToPos(range.fromOffset + replacement.length));
-			this.persist(editor, range);
+			editor.setCursor(editor.offsetToPos(offsets.fromOffset + replacement.length));
+			this.persist(editor, anchor);
 			return;
 		}
 
 		const lines = editor.getValue().split("\n");
-		const insertAt = blockInsertLine(
-			lines,
-			editor.offsetToPos(range.toOffset).line,
-		);
-		const block = serializeBlock(range.text, body);
+		const insertAt = blockInsertLine(lines, editor.offsetToPos(offsets.toOffset).line);
+		const block = serializeBlock(anchor.text, body);
 		const blockLines = block.split("\n");
 		const tail = blockLines[blockLines.length - 1];
 
@@ -668,7 +721,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 				ch: tail.length,
 			});
 		}
-		this.persist(editor, range);
+		this.persist(editor, anchor);
 	}
 
 	/**
@@ -676,11 +729,11 @@ export default class LildogAnnotatePlugin extends Plugin {
 	 * 编辑器里 requestSave 就够了；阅读视图里编辑器不是当前显示的视图，
 	 * Obsidian 不会自动保存，得直接写一遍文件（内容和编辑器内存一致）。
 	 */
-	private persist(editor: Editor, range: SourceRange): void {
+	private persist(editor: Editor, context: PersistContext): void {
 		// 刚写完/删完的这一刻别再弹浮窗：卡片一消失，鼠标底下往往正好是
 		// 另一条高亮，浮窗会「啪」地又冒出来，看着就像没关掉
 		this.hoverSuppressedUntil = Date.now() + 450;
-		const view = range.view;
+		const view = context.view;
 		if (!view) return;
 		if (view.getMode() === "preview" && view.file) {
 			void this.app.vault
@@ -689,6 +742,34 @@ export default class LildogAnnotatePlugin extends Plugin {
 			return;
 		}
 		view.requestSave?.();
+		this.scheduleTableRedecorate(60);
+	}
+
+	/**
+	 * 表格高亮的「补画」。
+	 *
+	 * Obsidian 的表格 widget 会缓存每个格子渲染出来的 DOM。你进过某一格（它开嵌套编辑器、
+	 * 把渲染态藏起来），离开时它把**编辑前那份缓存**显示回来 —— 那份是批注存在之前渲染的，
+	 * 后处理器不会再跑，表现就是「批注过了，点开表格外面格子里就没有高亮」。
+	 *
+	 * 所以几个「缓存可能刚被顶上来」的时刻都排一次补画：鼠标点完、回车/Esc、正文变动、
+	 * 写完批注。补画是幂等的，重复跑不会套两层。
+	 */
+	private scheduleTableRedecorate(delay = 200): void {
+		if (this.tableRedecorateTimer !== null) window.clearTimeout(this.tableRedecorateTimer);
+		this.tableRedecorateTimer = window.setTimeout(() => {
+			this.tableRedecorateTimer = null;
+			for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+				const view = leaf.view;
+				if (!(view instanceof MarkdownView)) continue;
+				if (view.getMode() === "preview") continue;
+				const doc = view.editor.getValue();
+				if (!doc.includes(MARKER)) continue;
+				// 界面上没有渲染出来的表格就没什么可补的（正文一变就会走到这儿）
+				if (!view.containerEl.querySelector("td, th")) continue;
+				redecorateTableCells(view.containerEl, doc);
+			}
+		}, delay);
 	}
 
 	/**
@@ -770,7 +851,9 @@ export default class LildogAnnotatePlugin extends Plugin {
 						new Notice("这条批注已经变化，请重试");
 						return;
 					}
-					const replacement = serializeInline(found.text, body);
+					const replacement = serializeInline(found.text, body, {
+						inTable: isAnnotationInTable(editor.getValue(), fromOffset),
+					});
 					editor.replaceRange(replacement, found.from, found.to);
 					// 光标挪到批注之后：标记立刻收起，不用再点别的地方
 					editor.setCursor(editor.offsetToPos(fromOffset + replacement.length));
@@ -786,12 +869,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 					);
 				}
 				// 阅读视图里必须自己写一遍文件（编辑器不是当前显示的视图）
-				this.persist(editor, {
-					text: found.text,
-					fromOffset,
-					toOffset,
-					view,
-				});
+				this.persist(editor, { view });
 			},
 		}).open();
 	}
@@ -821,16 +899,10 @@ export default class LildogAnnotatePlugin extends Plugin {
 			// 只去掉批注，原文留下
 			editor.replaceRange(found.text, found.from, found.to);
 			editor.setCursor(editor.offsetToPos(fromOffset + found.text.length));
-			this.persist(editor, {
-				text: found.text,
-				fromOffset,
-				toOffset,
-				view: fileView,
-			});
+			this.persist(editor, { view: fileView });
 			return;
 		}
 
-		const fromOffset = editor.posToOffset(found.from);
 		const lines = editor.getValue().split("\n");
 		if (found.to.line + 1 < lines.length) {
 			editor.replaceRange("", found.from, {
@@ -840,12 +912,7 @@ export default class LildogAnnotatePlugin extends Plugin {
 		} else {
 			editor.replaceRange("", found.from, found.to);
 		}
-		this.persist(editor, {
-			text: found.text,
-			fromOffset,
-			toOffset: fromOffset,
-			view: fileView,
-		});
+		this.persist(editor, { view: fileView });
 	}
 
 	// ---------------------------------------------------------------- 迁移
@@ -862,15 +929,28 @@ export default class LildogAnnotatePlugin extends Plugin {
 		}
 
 		// 从后往前替换，前面的偏移才不会被搅乱
+		let migrated = 0;
+		let skipped = 0;
 		for (const ann of legacy.slice().reverse()) {
 			const plan = planLegacyMigration(doc, ann);
+			// 转成新格式会把标记搬到原文**前面**：落在表格行首 / 分隔行上时那一行
+			// 就不再是表格行（实测 Obsidian 会把表断开）。这种就留着不动，最后报给用户。
+			if (!canUseInlineInTable(doc, plan.from, plan.text)) {
+				skipped++;
+				continue;
+			}
 			editor.replaceRange(
 				plan.replacement,
 				editor.offsetToPos(plan.from),
 				editor.offsetToPos(plan.to),
 			);
+			migrated++;
 		}
-		new Notice(`已把 ${legacy.length} 条旧格式批注转成新格式`);
+		new Notice(
+			skipped
+				? `已转换 ${migrated} 条旧格式批注；${skipped} 条在表格行首（转换会把表格断开），已跳过`
+				: `已把 ${migrated} 条旧格式批注转成新格式`,
+		);
 	}
 
 	// ---------------------------------------------------------------- 设置

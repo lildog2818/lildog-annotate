@@ -263,11 +263,13 @@ export class HoverCard {
 		}
 		this.textarea?.removeClass("lildog-card-textarea-error");
 		this.draft = null;
+		// 内容一个字没改就别写回去：白写一次会多一条撤销记录，正文还得整段重画
+		const unchanged = body === target.body.trim();
 		// 先收起再写回：省得写回时 DOM 变了、浮窗却还挂在那儿。
 		// 这里先把 editing 落掉，否则 hide() 会把刚保存的内容又当成草稿留一份。
 		this.editing = false;
 		this.hide();
-		this.options.onSave(target, body);
+		if (!unchanged) this.options.onSave(target, body);
 	}
 
 	/** 删掉这条批注（浮窗里的「删除」按钮，或内容清空后回车） */

@@ -22,6 +22,10 @@ export interface DiagnosticCounters {
 	annotationsMatched: number;
 	/** 走整篇兜底读取的次数 */
 	fallbackReads: number;
+	/** 算不出源码位置、按「宁可不画也不画错」原则跳过的次数 */
+	positionMisses: number;
+	/** 按源码位置（而不是按文字）配对成功的批注数 */
+	positionMatched: number;
 	/** 悬停浮窗弹出来的次数 */
 	hoverShows: number;
 	/** 悬停到高亮、但认不出是哪条批注的次数 */
@@ -45,6 +49,8 @@ export const diag: DiagnosticCounters = {
 	marksFound: 0,
 	annotationsMatched: 0,
 	fallbackReads: 0,
+	positionMisses: 0,
+	positionMatched: 0,
 	hoverShows: 0,
 	hoverMisses: 0,
 	hoverEdits: 0,
@@ -62,6 +68,8 @@ export function resetDiagnostics(): void {
 	diag.marksFound = 0;
 	diag.annotationsMatched = 0;
 	diag.fallbackReads = 0;
+	diag.positionMisses = 0;
+	diag.positionMatched = 0;
 	diag.hoverShows = 0;
 	diag.hoverMisses = 0;
 	diag.hoverEdits = 0;

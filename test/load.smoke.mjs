@@ -361,7 +361,7 @@ try {
 	const written = app.vault.__files.get("DSH/lildog-自检报告.md");
 	report = written?.content ?? "";
 } catch (error) {
-	failures.push(`自检命令抛异常：${error?.message ?? error}`);
+	failures.push(`自检命令抛异常：${error?.stack ?? error}`);
 }
 
 check("自检报告写进了 DSH 目录", report.length > 0);

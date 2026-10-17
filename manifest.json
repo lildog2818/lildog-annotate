@@ -1,7 +1,7 @@
 {
 	"id": "lildog-annotate",
 	"name": "Lildog Annotate",
-	"version": "1.5.0",
+	"version": "1.6.0",
 	"minAppVersion": "1.4.0",
 	"description": "选中文字即可加批注，批注以纯文本标记写进笔记，人和 AI 都能直接读取。Inline annotations stored as plain text, readable by humans and AI.",
 	"author": "lildog2818",

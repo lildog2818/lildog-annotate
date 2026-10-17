@@ -14,7 +14,23 @@
  *
  * 旧格式（v1.0/1.1 写过，仍然能解析、编辑、删除）：
  *   ==被批注的文字==<!-- lildog: 批注内容 -->
+ *
+ * 表格行里多一条规矩：批注正文里的 `|` 是单元格分隔符，所以写在表格行内时会转义成
+ * `\|`（解析时再转回来）。原文不用转义 —— 原文里出现没转义的 `|` 就意味着跨了单元格，
+ * 那种选区根本不许走行内格式（见 canUseInlineInTable）。
  */
+
+import {
+	hasUnescapedPipe,
+	isAtTableRowStart,
+	isOffsetInTableRow,
+	isOffsetOnDelimiterRow,
+	lineOfOffset,
+	lineOffsets,
+	tableBlockAt,
+} from "./tablemap.ts";
+
+export { lineOffsets };
 
 export const MARKER = "lildog";
 
@@ -83,6 +99,21 @@ export function isBlockHead(line: string): boolean {
 export function findInlineAnnotations(doc: string): InlineAnnotation[] {
 	const found: InlineAnnotation[] = [];
 
+	// 表格行里的批注正文把 `|` 写成了 `\|`（见 serializeInline），读回来要还原。
+	// 只有正文里真的出现 `\|` 时才去算行号和表范围 —— 别给每次装饰重建都加成本。
+	let tableLines: string[] | null = null;
+	let tableOffsets: number[] | null = null;
+	const readBody = (body: string, at: number): string => {
+		if (!body.includes("\\|")) return body;
+		if (!tableLines || !tableOffsets) {
+			tableLines = doc.split("\n");
+			tableOffsets = lineOffsets(doc);
+		}
+		const line = lineOfOffset(tableOffsets, at);
+		if (!tableBlockAt(tableLines, line)) return body;
+		return body.replace(/\\\|/g, "|");
+	};
+
 	const pairRe = markerRegex();
 	let m: RegExpExecArray | null;
 	while ((m = pairRe.exec(doc)) !== null) {
@@ -94,7 +125,7 @@ export function findInlineAnnotations(doc: string): InlineAnnotation[] {
 			from: m.index,
 			to: m.index + whole.length,
 			text: m[2],
-			body: m[1],
+			body: readBody(m[1], m.index),
 			textFrom,
 			textTo,
 			hiddenRanges: [
@@ -120,7 +151,7 @@ export function findInlineAnnotations(doc: string): InlineAnnotation[] {
 				from: start,
 				to: end,
 				text: m[1],
-				body: m[2],
+				body: readBody(m[2], start),
 				textFrom,
 				textTo,
 				hiddenRanges: [[start + commentRel, end]],
@@ -150,15 +181,73 @@ export function canUseInline(text: string): boolean {
 	);
 }
 
+/**
+ * 表格行里能不能用行内批注：**跨格不行，落在分隔行上不行，落在行首也不行**。
+ *
+ * 标记一旦包住一个没转义的 `|`，那一行在表格里就会多切一格（内容整体右移、最后一格
+ * 被丢掉）；要是标记包住了整行、或者落在分隔行上，那一行按 GFM 就不再是表格行，
+ * **整张表在那里断掉**（实测 Obsidian 会把剩下的行当普通文字显示）。所以表格里的
+ * 行内批注只允许落在「有前导管道的数据格内部」，其余一律降级成段落批注。
+ */
+export function canUseInlineInTable(doc: string, fromOffset: number, text: string): boolean {
+	return explainInlineRefusal(doc, fromOffset, text) === null;
+}
+
+/** 文字本身就不适合行内批注时的原因（给用户看的一句话） */
+function whyNotInlineText(text: string): string {
+	if (!text.trim()) return "选中的是空白";
+	if (text.includes("\n") || text.includes("\r")) return "选中的文字跨了行";
+	if (text.includes("<!--")) return "选中的文字里有 `<!--`（它会把批注标记搅乱）";
+	return `选中的文字里有「${MARKER}」这个词（标记保留词）`;
+}
+
+/**
+ * 为什么这里不能写行内批注 —— 能用就返回 null，不能用返回一句给人看的话。
+ *
+ * 写入路径只有这一处判据（`openComposer` 拿它决定要不要降级成段落批注），
+ * 所以「哪种位置会改坏文档结构」这件事只在这里维护一份。
+ */
+export function explainInlineRefusal(
+	doc: string,
+	fromOffset: number,
+	text: string,
+): string | null {
+	if (!canUseInline(text)) return whyNotInlineText(text);
+	if (!isOffsetInTableRow(doc, fromOffset)) return null;
+	if (isOffsetOnDelimiterRow(doc, fromOffset)) {
+		return "这里是表格的分隔行（`| --- | --- |`），动它整张表就不再是表格";
+	}
+	if (hasUnescapedPipe(text)) return "选区跨了单元格（原文里有没转义的 `|`）";
+	if (isAtTableRowStart(doc, fromOffset)) {
+		return "选区在表格行的开头（标记写在行首会把这张表断开）";
+	}
+	return null;
+}
+
 /** 批注正文里的 `-->` 会提前关闭 HTML 注释，做转义 */
 function escapeBody(body: string): string {
 	return body.replace(/-->/g, "-- >");
 }
 
+export interface SerializeOptions {
+	/** 批注写在表格行里：正文里的 `|` 得转义，否则会把那一行多切一格 */
+	inTable?: boolean;
+}
+
+/** 这条批注是不是写在表格行里（决定改批注时正文里的 `|` 要不要转义） */
+export function isAnnotationInTable(doc: string, from: number): boolean {
+	return isOffsetInTableRow(doc, from);
+}
+
 /** 生成行内批注文本 */
-export function serializeInline(text: string, body: string): string {
+export function serializeInline(
+	text: string,
+	body: string,
+	options: SerializeOptions = {},
+): string {
 	const oneLine = escapeBody(body).replace(/\s*\r?\n\s*/g, " ").trim();
-	return `<!--${MARKER}: ${oneLine}-->${text}<!--/${MARKER}-->`;
+	const safe = options.inTable ? oneLine.replace(/\|/g, "\\|") : oneLine;
+	return `<!--${MARKER}: ${safe}-->${text}<!--/${MARKER}-->`;
 }
 
 /** 生成段落批注文本 */
@@ -220,7 +309,9 @@ export function planLegacyMigration(
 		from: ann.from,
 		to: ann.to + suffix.length,
 		text,
-		replacement: serializeInline(text, ann.body),
+		replacement: serializeInline(text, ann.body, {
+			inTable: isOffsetInTableRow(doc, ann.from),
+		}),
 	};
 }
 
@@ -253,14 +344,7 @@ export interface TextLocation {
 	matches: number;
 }
 
-/** 每行起始处的字符偏移（lineOffsets[i] 是第 i 行的起点） */
-export function lineOffsets(doc: string): number[] {
-	const offsets = [0];
-	for (let i = 0; i < doc.length; i++) {
-		if (doc[i] === "\n") offsets.push(i + 1);
-	}
-	return offsets;
-}
+/** 每行起始处的字符偏移（lineOffsets[i] 是第 i 行的起点）—— 实现在 tablemap.ts */
 
 /**
  * 在源码里定位一段文字。阅读视图和编辑器里的表格（块级 widget）拿不到
@@ -455,11 +539,13 @@ function parseBlockBody(lines: string[], start: number, end: number): string {
 
 /**
  * 段落批注应插入到第几行之前（0 起行号）。
- * 规则：紧跟选区所在段落之后；若后面紧接着已有引用块，则跳过整个引用块，
- * 免得把新 callout 插进别人的 callout 里面。
+ * 规则：紧跟选区所在段落之后；选区落在表格里就推到**整张表之后**（插在表格中间会把
+ * 表格劈成两半）；若后面紧接着已有引用块，则跳过整个引用块，免得把新 callout 插进
+ * 别人的 callout 里面。
  */
 export function blockInsertLine(lines: string[], toLine: number): number {
-	let i = toLine + 1;
+	const table = tableBlockAt(lines, toLine);
+	let i = table ? table.endLine + 1 : toLine + 1;
 	while (i < lines.length && /^[ \t]*>/.test(lines[i])) i++;
 	return i;
 }

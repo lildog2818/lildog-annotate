@@ -3,6 +3,9 @@ import type { App } from "obsidian";
 import { BUILD_ID } from "./build";
 import { diag } from "./diagnostics";
 import { explainReveal, findInlineAnnotations } from "./format";
+import type { InlineAnnotation } from "./format";
+import { lineOffsets, lineOfOffset, splitRowCells, tableBlockAt, isAtTableRowStart } from "./tablemap";
+import type { TableBlock } from "./tablemap";
 import { countLildogRules, hasInjectedStyles } from "./style";
 import { resolveHighlight } from "./resolve";
 
@@ -20,6 +23,87 @@ function clip(text: string, limit: number): string {
 	return text.length > limit
 		? `${text.slice(0, limit)}\n…（已截断，共 ${text.length} 字）`
 		: text;
+}
+
+/**
+ * 表格批注体检：把落在表格行里的批注逐条列出来 —— 在第几行第几格、那一格的文字
+ * 在整张表里重复几次（重复 = 锚错了也看不出来）、每一行的格数是否跟表头一致。
+ * **只报告，不改原文**：要不要动，你看了清单自己定。
+ */
+function tableAnnotationHealth(doc: string, annotations: InlineAnnotation[]): string[] {
+	const lines = doc.split("\n");
+	const offsets = lineOffsets(doc);
+	const out: string[] = ["#### 表格批注体检（只报告，不改原文）"];
+	const oneLine = (text: string, limit: number): string =>
+		text.replace(/\s+/g, " ").slice(0, limit);
+
+	const blocks = new Map<number, TableBlock>();
+	for (let i = 0; i < lines.length; i++) {
+		const block = tableBlockAt(lines, i);
+		if (block) blocks.set(block.headerLine, block);
+	}
+
+	if (!blocks.size) {
+		out.push("- 这篇笔记里没有表格。");
+		return out;
+	}
+
+	const inTable = annotations
+		.map((ann) => ({ ann, line: lineOfOffset(offsets, ann.from) }))
+		.filter((item) => {
+			const block = tableBlockAt(lines, item.line);
+			return !!block && blocks.has(block.headerLine);
+		});
+	out.push(`- 表格 ${blocks.size} 张 / 落在表格行里的批注 ${inTable.length} 条`);
+
+	for (const block of blocks.values()) {
+		const headerCells = splitRowCells(lines[block.headerLine]).length;
+		let odd = 0;
+		for (let i = block.headerLine + 2; i <= block.endLine; i++) {
+			if (splitRowCells(lines[i]).length !== headerCells) odd++;
+		}
+		out.push(
+			`- 表头在第 ${block.headerLine + 1} 行（${headerCells} 格，表格到第 ${block.endLine + 1} 行）：${
+				odd ? `⚠ ${odd} 行的格数跟表头不一致（表格结构可能被标记改过）` : "每行格数一致 ✓"
+			}`,
+		);
+	}
+
+	for (const { ann, line } of inTable) {
+		const block = tableBlockAt(lines, line);
+		if (!block) continue;
+		const base = offsets[line];
+		const cells = splitRowCells(lines[line]);
+		const col = cells.findIndex(
+			(cell) => ann.textFrom >= base + cell.from && ann.textTo <= base + cell.to,
+		);
+		const cellText = col >= 0 ? cells[col].text : "";
+		let repeats = 0;
+		if (cellText) {
+			for (let i = block.headerLine; i <= block.endLine; i++) {
+				for (const cell of splitRowCells(lines[i])) if (cell.text === cellText) repeats++;
+			}
+		}
+		// 这两条是**改结构**级别的：分隔行被动过、或者标记落在行首（那一行以 `<!--`
+		// 开头），按 GFM 表格都会在那里断掉 —— 界面上的表现是「后面几行掉出表格」。
+		const onDelimiter = block.delimiterLine === line;
+		const flags: string[] = [];
+		if (onDelimiter) {
+			flags.push("⚠ 落在表格的分隔行（`| --- | --- |`）上 —— 这一行被改过，整张表可能已经不成表了");
+		} else if (col < 0) {
+			flags.push("⚠ 原文跨了单元格（标记包住了 `|`）");
+		} else if (isAtTableRowStart(doc, ann.from)) {
+			flags.push("⚠ 标记在表格行首（那一行以 `<!--` 开头，表格会在那里断开）");
+		}
+		if (repeats > 1) flags.push(`⚠ 这一格的内容在表里出现 ${repeats} 次，锚错了也看不出来`);
+		out.push(
+			`- 第 ${line + 1} 行${col >= 0 ? `第 ${col + 1} 格` : ""}：原文「${oneLine(ann.text, 24)}」/ 批注「${oneLine(ann.body, 24)}」${
+				flags.length ? ` ${flags.join("；")}` : ""
+			}`,
+		);
+	}
+	if (!inTable.length) out.push("- 没有批注落在表格行里。");
+	return out;
 }
 
 function describeNodes(el: Element | null): string {
@@ -182,6 +266,10 @@ export async function writeSelfCheckReport(
 			lines.push("- 该文件没有行内批注，跳过逐条探针。");
 			return;
 		}
+
+		// 表格批注体检：只列清单，不动原文
+		lines.push("");
+		for (const item of tableAnnotationHealth(doc, annotations)) lines.push(item);
 
 		// 逐条：露出判定 + 高亮几何 + 悬停解析，一次把「为什么看不见 / 弹不出来」说清
 		annotations.forEach((ann, order) => {
